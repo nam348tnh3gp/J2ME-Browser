@@ -1,0 +1,4 @@
+MIDlet-1: MiniBrowser, , MiniBrowser
+MIDlet-Vendor: You
+MIDlet-Version: 1.0
+MIDlet-Permissions: javax.microedition.io.Connector.socket
