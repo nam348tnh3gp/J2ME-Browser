@@ -23,27 +23,20 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     int activeTab = 0;
     boolean firstRun = false;
 
-    // Commands (2 softkey + menu items)
     Command menuCmd, backCmd;
 
-    // Cache & network
     Hashtable cache = new Hashtable();
     volatile boolean stopRequested = false;
     volatile SocketConnection currentConnection = null;
 
-    // Bookmarks + Speed Dial
-    Vector bookmarks = new Vector();       // String[2]{title,url}
-    Vector speedDial = new Vector();       // String[2]{title,url}
+    Vector bookmarks = new Vector();
+    Vector speedDial = new Vector();
     static final String[][] DEFAULT_DIAL = {
-        {"Google",    "http://google.com"},
-        {"Wikipedia", "http://vi.wikipedia.org"},
-        {"VNExpress", "http://vnexpress.net"},
-        {"Dan Tri",   "http://dantri.com.vn"},
-        {"YouTube",   "http://m.youtube.com"},
-        {"Facebook",  "http://m.facebook.com"},
-        {"Bao Moi",   "http://baomoi.com"},
-        {"Tinhte",    "http://tinhte.vn"},
-        {"Example",   "http://example.com"}
+        {"Google", "http://google.com"}, {"Wikipedia", "http://vi.wikipedia.org"},
+        {"VNExpress", "http://vnexpress.net"}, {"Dan Tri", "http://dantri.com.vn"},
+        {"YouTube", "http://m.youtube.com"}, {"Facebook", "http://m.facebook.com"},
+        {"Bao Moi", "http://baomoi.com"}, {"Tinhte", "http://tinhte.vn"},
+        {"Example", "http://example.com"}
     };
 
     static class Tab {
@@ -51,7 +44,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         Image image;
         Vector links;
         int scrollY = 0;
-        long bytes = 0;
+        int lastBytes = 0;
         Tab() {}
     }
 
@@ -97,8 +90,6 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     Tab activeTab() { return (Tab) tabs.elementAt(activeTab); }
 
-    // ── Menu ──
-
     void showMenu() {
         List menu = new List("Menu", List.IMPLICIT);
         menu.append("URL...", null);
@@ -137,18 +128,13 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     }
 
     void goHome() {
-        activeTab().url = "home://";
-        activeTab().image = null;
-        activeTab().links = null;
-        activeTab().scrollY = 0;
+        Tab t = activeTab();
+        t.url = "home://"; t.image = null; t.links = null; t.scrollY = 0;
         canvas.repaint();
     }
 
     void newTab() {
-        if (tabs.size() >= MAX_TABS) {
-            canvas.setStatus("Tối đa " + MAX_TABS + " tab");
-            return;
-        }
+        if (tabs.size() >= MAX_TABS) { canvas.setStatus("Tối đa " + MAX_TABS + " tab"); return; }
         tabs.addElement(new Tab());
         activeTab = tabs.size() - 1;
         canvas.repaint();
@@ -163,25 +149,19 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         }
         list.addCommand(new Command("Đóng tab này", Command.SCREEN, 1));
         list.addCommand(new Command("Hủy", Command.CANCEL, 2));
-
         final List l = list;
         list.setCommandListener(new CommandListener() {
             public void commandAction(Command c, Displayable d) {
-                if (c.getCommandType() == Command.CANCEL) {
-                    display.setCurrent(canvas);
-                } else if (c.getLabel().equals("Đóng tab này")) {
+                if (c.getCommandType() == Command.CANCEL) display.setCurrent(canvas);
+                else if (c.getLabel().equals("Đóng tab này")) {
                     if (tabs.size() > 1) {
                         tabs.removeElementAt(activeTab);
                         if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
                     }
-                    display.setCurrent(canvas);
-                    canvas.repaint();
+                    display.setCurrent(canvas); canvas.repaint();
                 } else {
                     int idx = l.getSelectedIndex();
-                    if (idx >= 0 && idx < tabs.size()) {
-                        activeTab = idx;
-                        canvas.repaint();
-                    }
+                    if (idx >= 0 && idx < tabs.size()) { activeTab = idx; canvas.repaint(); }
                     display.setCurrent(canvas);
                 }
             }
@@ -191,24 +171,17 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     void reload() {
         Tab t = activeTab();
-        cache.remove(t.url);
-        t.image = null;
-        t.links = null;
+        cache.remove(t.url); t.image = null; t.links = null;
         if (!"home://".equals(t.url)) loadAsync(t.url);
     }
 
     void goBack() {
         Tab t = activeTab();
-        if (t.image != null || (t.links != null && t.links.size() > 0)) {
-            // Đang xem trang → về Home
-            goHome();
-        } else {
-            // Đang ở home → lùi tab
-            if (tabs.size() > 1) {
-                tabs.removeElementAt(activeTab);
-                if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
-                canvas.repaint();
-            }
+        if (t.image != null || (t.links != null && t.links.size() > 0)) goHome();
+        else if (tabs.size() > 1) {
+            tabs.removeElementAt(activeTab);
+            if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
+            canvas.repaint();
         }
     }
 
@@ -228,16 +201,12 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                 if (c.getLabel().equals("Xóa")) {
                     int idx = l.getSelectedIndex();
                     if (idx >= 0) { bookmarks.removeElementAt(idx); saveBookmarks(); }
-                    display.setCurrent(canvas);
-                    return;
+                    display.setCurrent(canvas); return;
                 }
                 int idx = l.getSelectedIndex();
                 if (idx >= 0) {
                     String[] bm = (String[]) bookmarks.elementAt(idx);
-                    activeTab().url = bm[1];
-                    activeTab().image = null;
-                    activeTab().links = null;
-                    activeTab().scrollY = 0;
+                    activeTab().url = bm[1]; activeTab().image = null; activeTab().links = null; activeTab().scrollY = 0;
                     loadAsync(bm[1]);
                 }
                 display.setCurrent(canvas);
@@ -248,25 +217,15 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     void saveBookmark() {
         Tab t = activeTab();
-        if ("home://".equals(t.url) || t.url == null) {
-            canvas.setStatus("Không có trang để lưu");
-            return;
-        }
-        String title = shorten(t.url, 40);
-        // Tránh trùng
+        if ("home://".equals(t.url) || t.url == null) { canvas.setStatus("Không có trang để lưu"); return; }
         for (int i = 0; i < bookmarks.size(); i++) {
             String[] bm = (String[]) bookmarks.elementAt(i);
-            if (bm[1].equals(t.url)) {
-                canvas.setStatus("Đã có bookmark");
-                return;
-            }
+            if (bm[1].equals(t.url)) { canvas.setStatus("Đã có bookmark"); return; }
         }
-        bookmarks.addElement(new String[]{ title, t.url });
+        bookmarks.addElement(new String[]{ shorten(t.url, 40), t.url });
         saveBookmarks();
         canvas.setStatus("Đã lưu bookmark");
     }
-
-    // ── RMS ──
 
     boolean loadSettings() {
         RecordStore rs = null; boolean exists = false;
@@ -275,11 +234,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             if (rs.getNumRecords() > 0) {
                 String s = new String(rs.getRecord(1), "UTF-8");
                 int idx = s.lastIndexOf(':');
-                if (idx > 0) {
-                    proxyHost = s.substring(0, idx);
-                    proxyPort = Integer.parseInt(s.substring(idx + 1));
-                    exists = true;
-                }
+                if (idx > 0) { proxyHost = s.substring(0, idx); proxyPort = Integer.parseInt(s.substring(idx + 1)); exists = true; }
             }
         } catch (Exception e) {}
         finally { if (rs != null) try { rs.closeRecordStore(); } catch (Exception e) {} }
@@ -293,7 +248,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             byte[] d = (proxyHost + ":" + proxyPort).getBytes("UTF-8");
             if (rs.getNumRecords() > 0) rs.setRecord(1, d, 0, d.length);
             else rs.addRecord(d, 0, d.length);
-        } catch (Exception e) { canvas.setStatus("Lỗi lưu: " + e.getMessage()); }
+        } catch (Exception e) {}
         finally { if (rs != null) try { rs.closeRecordStore(); } catch (Exception e) {} }
     }
 
@@ -308,8 +263,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                 for (int i = 0; i < lines.length; i++) {
                     if (lines[i].length() == 0) continue;
                     int bar = lines[i].indexOf('|');
-                    if (bar > 0) bookmarks.addElement(new String[]{
-                        lines[i].substring(0, bar), lines[i].substring(bar + 1)});
+                    if (bar > 0) bookmarks.addElement(new String[]{ lines[i].substring(0, bar), lines[i].substring(bar + 1) });
                 }
             }
         } catch (Exception e) {}
@@ -334,12 +288,9 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     void loadSpeedDial() {
         speedDial.removeAllElements();
-        for (int i = 0; i < DEFAULT_DIAL.length; i++) {
+        for (int i = 0; i < DEFAULT_DIAL.length; i++)
             speedDial.addElement(new String[]{ DEFAULT_DIAL[i][0], DEFAULT_DIAL[i][1] });
-        }
     }
-
-    // ── Cấu hình proxy ──
 
     void promptSettings() {
         final TextBox tb = new TextBox("Proxy (host:port)", proxyHost + ":" + proxyPort, 100, TextField.URL);
@@ -350,8 +301,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             public void commandAction(Command c, Displayable d) {
                 if (c.getCommandType() == Command.OK) applyProxyInput(tb.getString());
                 else if (c.getLabel().equals("Mặc định")) {
-                    proxyHost = DEFAULT_HOST; proxyPort = DEFAULT_PORT;
-                    saveSettings();
+                    proxyHost = DEFAULT_HOST; proxyPort = DEFAULT_PORT; saveSettings();
                     canvas.setStatus("Mặc định: " + proxyHost + ":" + proxyPort);
                     display.setCurrent(canvas);
                 } else display.setCurrent(canvas);
@@ -389,10 +339,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                     String u = tb.getString().trim();
                     if (u.length() == 0) { display.setCurrent(canvas); return; }
                     if (u.indexOf("://") < 0) u = "http://" + u;
-                    activeTab().url = u;
-                    activeTab().image = null;
-                    activeTab().links = null;
-                    activeTab().scrollY = 0;
+                    activeTab().url = u; activeTab().image = null; activeTab().links = null; activeTab().scrollY = 0;
                     loadAsync(u);
                 }
                 display.setCurrent(canvas);
@@ -400,8 +347,6 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         });
         display.setCurrent(tb);
     }
-
-    // ── Network ──
 
     synchronized void abortCurrent() {
         stopRequested = true;
@@ -416,17 +361,12 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     }
 
     void loadUrl(String url) {
-        // Cache hit
         Object c = cache.get(url);
         if (c != null) {
             Object[] arr = (Object[]) c;
             Tab t = activeTab();
-            t.image = (Image) arr[0];
-            t.links = (Vector) arr[1];
-            t.scrollY = 0;
-            t.url = url;
-            canvas.stopLoading();
-            canvas.repaint();
+            t.image = (Image) arr[0]; t.links = (Vector) arr[1]; t.scrollY = 0; t.url = url;
+            canvas.stopLoading(); canvas.repaint();
             return;
         }
 
@@ -445,9 +385,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             out.writeInt(ub.length); out.write(ub); out.flush();
 
             DataInputStream in = new DataInputStream(sc.openInputStream());
-            int w = in.readInt();
-            int h = in.readInt();
-            int len = in.readInt();
+            int w = in.readInt(); int h = in.readInt(); int len = in.readInt();
             if (len <= 0 || len > 5 * 1024 * 1024) throw new IOException("Kích thước sai");
 
             byte[] imgData = new byte[len];
@@ -475,14 +413,11 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             cache.put(url, new Object[]{ img, links });
 
             Tab t = activeTab();
-            t.url = url;
-            t.image = img;
-            t.links = links;
-            t.scrollY = 0;
-            t.bytes = imgData.length;
+            t.url = url; t.image = img; t.links = links; t.scrollY = 0;
+            t.lastBytes = imgData.length;
 
-            canvas.stopLoading();
-            canvas.repaint();
+            canvas.stopLoading(); canvas.repaint();
+            canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB)");
         } catch (Exception e) {
             canvas.stopLoading();
             if (!stopRequested) {
@@ -495,19 +430,16 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         }
     }
 
-    // ── Helpers ──
     static String shorten(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max - 1) + "…";
     }
+
     static String[] split(String s, char sep) {
         Vector v = new Vector();
         int start = 0;
         for (int i = 0; i < s.length(); i++) {
-            if (s.charAt(i) == sep) {
-                v.addElement(s.substring(start, i));
-                start = i + 1;
-            }
+            if (s.charAt(i) == sep) { v.addElement(s.substring(start, i)); start = i + 1; }
         }
         v.addElement(s.substring(start));
         String[] r = new String[v.size()];
@@ -517,7 +449,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  Canvas: URL bar + Speed Dial + Page + loading
+//  BrowserCanvas (giữ nguyên từ v4)
 // ═══════════════════════════════════════════════════════════════
 
 class BrowserCanvas extends Canvas {
@@ -526,7 +458,6 @@ class BrowserCanvas extends Canvas {
     String status = "";
     int selectedLink = -1;
 
-    // Touch
     private int pressX, pressY;
     private long pressTime;
     private int lastDragY;
@@ -537,12 +468,10 @@ class BrowserCanvas extends Canvas {
     private int lastTapX, lastTapY;
     private volatile boolean momentumCancelled = false;
 
-    // Loading
     private volatile boolean loading = false;
     private volatile int loadingFrame = 0;
     private Thread loadingThread;
 
-    // Layout constants
     private static final int URLBAR_H = 16;
 
     BrowserCanvas(MiniBrowser m) {
@@ -577,16 +506,12 @@ class BrowserCanvas extends Canvas {
     int contentTop() { return urlBarHeight(); }
     int contentViewH() { return getHeight() - contentTop(); }
 
-    // ── Paint ──
     protected void paint(Graphics g) {
         int ubH = urlBarHeight();
         MiniBrowser.Tab t = midlet.activeTab();
 
-        // Background
-        g.setColor(0xFFFFFF);
-        g.fillRect(0, 0, getWidth(), getHeight());
+        g.setColor(0xFFFFFF); g.fillRect(0, 0, getWidth(), getHeight());
 
-        // Content
         if ("home://".equals(t.url)) {
             drawSpeedDial(g, ubH, getHeight());
         } else if (t.image != null) {
@@ -594,49 +519,30 @@ class BrowserCanvas extends Canvas {
             drawLinkHighlight(g, t, ubH);
             drawScrollbar(g, t, ubH);
         } else if (loading) {
-            g.setColor(0x888888);
-            g.setFont(font);
+            g.setColor(0x888888); g.setFont(font);
             String msg = "Đang tải" + dots(loadingFrame);
             int tw = font.stringWidth(msg);
-            g.drawString(msg, (getWidth() - tw) / 2,
-                getHeight() / 2 - font.getHeight() / 2, Graphics.TOP | Graphics.LEFT);
+            g.drawString(msg, (getWidth() - tw) / 2, getHeight() / 2 - font.getHeight() / 2, Graphics.TOP | Graphics.LEFT);
         } else if (status.length() > 0) {
-            g.setColor(0x666666);
-            g.setFont(font);
+            g.setColor(0x666666); g.setFont(font);
             int tw = font.stringWidth(status);
-            g.drawString(status, (getWidth() - tw) / 2,
-                getHeight() / 2 - font.getHeight() / 2, Graphics.TOP | Graphics.LEFT);
+            g.drawString(status, (getWidth() - tw) / 2, getHeight() / 2 - font.getHeight() / 2, Graphics.TOP | Graphics.LEFT);
         }
 
-        // URL bar (vẽ đè lên trên)
         drawUrlBar(g, ubH, t);
     }
 
     void drawUrlBar(Graphics g, int h, MiniBrowser.Tab t) {
-        // Nền
         g.setColor(loading ? 0xAADDFF : 0xEEEEEE);
         g.fillRect(0, 0, getWidth(), h);
-        g.setColor(0xCCCCCC);
-        g.drawLine(0, h - 1, getWidth(), h - 1);
-
-        // Nội dung: [<] url [x]
+        g.setColor(0xCCCCCC); g.drawLine(0, h - 1, getWidth(), h - 1);
         int btnW = 14;
-        g.setColor(0x000000);
-        g.setFont(font);
-
-        // Nút lùi
+        g.setColor(0x000000); g.setFont(font);
         g.drawString("◄", 2, 2, Graphics.TOP | Graphics.LEFT);
-        // Nút tải lại / dừng
         g.drawString(loading ? "×" : "↻", getWidth() - btnW, 2, Graphics.TOP | Graphics.LEFT);
-
-        // URL ở giữa
-        String shown;
-        if ("home://".equals(t.url)) shown = "Speed Dial";
-        else shown = t.url;
+        String shown = "home://".equals(t.url) ? "Speed Dial" : t.url;
         if (loading) shown = "Đang tải" + dots(loadingFrame);
-
-        int maxW = getWidth() - 2 * btnW - 6;
-        shown = truncate(shown, maxW);
+        shown = truncate(shown, getWidth() - 2 * btnW - 6);
         g.setColor(loading ? 0x000088 : 0x333333);
         g.drawString(shown, btnW + 2, 2, Graphics.TOP | Graphics.LEFT);
     }
@@ -669,44 +575,29 @@ class BrowserCanvas extends Canvas {
         int cols = 3, rows = 3;
         int cellW = w / cols, cellH = h / rows;
         int gap = 5;
-
-        g.setColor(0xFFFFFF);
-        g.fillRect(0, top, w, h);
-
+        g.setColor(0xFFFFFF); g.fillRect(0, top, w, h);
         int n = midlet.speedDial.size();
         for (int i = 0; i < cols * rows; i++) {
             int col = i % cols, row = i / cols;
             int x = col * cellW + gap;
             int y = top + row * cellH + gap;
-            int cw = cellW - 2 * gap;
-            int ch = cellH - 2 * gap;
+            int cw = cellW - 2 * gap, ch = cellH - 2 * gap;
             if (i >= n) continue;
-
             String[] entry = (String[]) midlet.speedDial.elementAt(i);
-
-            // Màu gradient giả
             int shade = 0x335577 + (i * 0x111122);
             if (shade > 0xFFFFFF) shade = 0xFFFFFF;
             g.setColor(shade);
             g.fillRoundRect(x, y, cw, ch, 8, 8);
-
-            // Viền
-            g.setColor(0xFFFFFF);
-            g.drawRoundRect(x, y, cw, ch, 8, 8);
-
-            // Tên (chữ cái đầu to + tên nhỏ)
-            g.setColor(0xFFFFFF);
+            g.setColor(0xFFFFFF); g.drawRoundRect(x, y, cw, ch, 8, 8);
             Font fBig = Font.getFont(Font.FACE_SYSTEM, Font.STYLE_BOLD, Font.SIZE_MEDIUM);
-            g.setFont(fBig);
+            g.setFont(fBig); g.setColor(0xFFFFFF);
             String initial = entry[0].length() > 0 ? entry[0].substring(0, 1).toUpperCase() : "?";
             int iw = fBig.stringWidth(initial);
             g.drawString(initial, x + (cw - iw) / 2, y + 6, Graphics.TOP | Graphics.LEFT);
-
             g.setFont(font);
             String title = truncate(entry[0], cw - 4);
             int tw = font.stringWidth(title);
-            g.drawString(title, x + (cw - tw) / 2, y + ch - font.getHeight() - 4,
-                Graphics.TOP | Graphics.LEFT);
+            g.drawString(title, x + (cw - tw) / 2, y + ch - font.getHeight() - 4, Graphics.TOP | Graphics.LEFT);
         }
     }
 
@@ -718,8 +609,7 @@ class BrowserCanvas extends Canvas {
     String truncate(String s, int maxW) {
         if (s == null) return "";
         if (font.stringWidth(s) <= maxW) return s;
-        while (s.length() > 1 && font.stringWidth(s + "…") > maxW)
-            s = s.substring(0, s.length() - 1);
+        while (s.length() > 1 && font.stringWidth(s + "…") > maxW) s = s.substring(0, s.length() - 1);
         return s + "…";
     }
 
@@ -734,7 +624,6 @@ class BrowserCanvas extends Canvas {
         repaint();
     }
 
-    // ── Touch ──
     protected void pointerPressed(int x, int y) {
         momentumCancelled = true;
         pressX = x; pressY = y; pressTime = System.currentTimeMillis();
@@ -759,20 +648,15 @@ class BrowserCanvas extends Canvas {
 
     protected void pointerReleased(int x, int y) {
         long dur = System.currentTimeMillis() - pressTime;
-        int dx = Math.abs(x - pressX);
-        int dy = Math.abs(y - pressY);
-
+        int dx = Math.abs(x - pressX), dy = Math.abs(y - pressY);
         if (isDragging) {
             if (Math.abs(velocity) > 1.5f) applyMomentum(velocity);
             return;
         }
         if (dur > 500 && dx < 15 && dy < 15) { longPress(x, y); return; }
-
         long now = System.currentTimeMillis();
         if (now - lastTapTime < 400 && Math.abs(x - lastTapX) < 40 && Math.abs(y - lastTapY) < 40) {
-            handleDoubleTap(x, y);
-            lastTapTime = 0;
-            return;
+            handleDoubleTap(x, y); lastTapTime = 0; return;
         }
         lastTapTime = now; lastTapX = x; lastTapY = y;
         handleTap(x, y);
@@ -784,8 +668,7 @@ class BrowserCanvas extends Canvas {
             public void run() {
                 float v = v0;
                 while (Math.abs(v) > 0.5f && !momentumCancelled) {
-                    scroll((int) v);
-                    v *= 0.90f;
+                    scroll((int) v); v *= 0.90f;
                     try { Thread.sleep(16); } catch (Exception e) { break; }
                 }
             }
@@ -795,8 +678,6 @@ class BrowserCanvas extends Canvas {
     void handleTap(int x, int y) {
         int ubH = urlBarHeight();
         MiniBrowser.Tab t = midlet.activeTab();
-
-        // Tap URL bar
         if (y < ubH) {
             int btnW = 14;
             if (x < btnW + 4) { midlet.goBack(); return; }
@@ -805,11 +686,8 @@ class BrowserCanvas extends Canvas {
                 else midlet.reload();
                 return;
             }
-            midlet.promptUrl();
-            return;
+            midlet.promptUrl(); return;
         }
-
-        // Speed Dial tap
         if ("home://".equals(t.url)) {
             int top = ubH;
             int w = getWidth(), h = getHeight() - top;
@@ -818,28 +696,23 @@ class BrowserCanvas extends Canvas {
             int idx = row * 3 + col;
             if (idx >= 0 && idx < midlet.speedDial.size()) {
                 String[] entry = (String[]) midlet.speedDial.elementAt(idx);
-                t.url = entry[1];
-                t.image = null; t.links = null; t.scrollY = 0;
+                t.url = entry[1]; t.image = null; t.links = null; t.scrollY = 0;
                 midlet.loadAsync(entry[1]);
             }
             return;
         }
-
-        // Page link hit
         int py = y - ubH + t.scrollY;
         if (t.links != null) {
             for (int i = 0; i < t.links.size(); i++) {
                 MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
                 if (x >= lr.x1 && x <= lr.x2 && py >= lr.y1 && py <= lr.y2) {
-                    selectedLink = i;
-                    repaint();
-                    activateLink(lr);
+                    selectedLink = i; repaint();
+                    t.url = lr.url; t.image = null; t.links = null; t.scrollY = 0;
+                    midlet.loadAsync(lr.url);
                     return;
                 }
             }
         }
-
-        // Tap zones
         int viewH = contentViewH();
         int tapY = y - ubH;
         if (tapY < viewH / 4) scroll(-viewH * 2 / 3);
@@ -865,20 +738,11 @@ class BrowserCanvas extends Canvas {
         for (int i = 0; i < t.links.size(); i++) {
             MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
             if (x >= lr.x1 && x <= lr.x2 && py >= lr.y1 && py <= lr.y2) {
-                setStatus(lr.url);
-                return;
+                setStatus(lr.url); return;
             }
         }
     }
 
-    void activateLink(MiniBrowser.LinkRect lr) {
-        MiniBrowser.Tab t = midlet.activeTab();
-        t.url = lr.url;
-        t.image = null; t.links = null; t.scrollY = 0;
-        midlet.loadAsync(lr.url);
-    }
-
-    // ── Keypad ──
     protected void keyPressed(int keyCode) {
         int action = 0;
         try { action = getGameAction(keyCode); } catch (Exception e) {}

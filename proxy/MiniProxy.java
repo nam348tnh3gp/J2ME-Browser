@@ -1,5 +1,6 @@
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.awt.image.IndexColorModel;
 import java.io.*;
 import java.lang.reflect.Field;
 import java.net.*;
@@ -20,7 +21,10 @@ public class MiniProxy {
     static final int PORT = 9999;
     static final String UA =
         "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) MiniProxy/3.2 Mobile Safari/537.36";
+        "(KHTML, like Gecko) MiniProxy/4.0 Mobile Safari/537.36";
+
+    // Cookie toàn cục (session persistence)
+    static final CookieManager cookieManager = new CookieManager();
 
     public static void main(String[] args) throws Exception {
         System.setProperty("java.awt.headless", "true");
@@ -30,8 +34,11 @@ public class MiniProxy {
         ensureTempDir();
         checkFonts();
 
+        // Khởi tạo cookie manager
+        CookieHandler.setDefault(cookieManager);
+
         ServerSocket ss = new ServerSocket(PORT);
-        System.out.println("MiniProxy v3.2 listening on " + PORT);
+        System.out.println("MiniProxy v4.0 listening on " + PORT);
         while (true) {
             final Socket s = ss.accept();
             new Thread(new Runnable() {
@@ -40,28 +47,16 @@ public class MiniProxy {
         }
     }
 
-    // ── Kiểm tra font (nguyên nhân chính của "một đống kí tự") ──
+    // ── Font check ──
     static void checkFonts() {
         try {
             String[] fonts = GraphicsEnvironment.getLocalGraphicsEnvironment()
                 .getAvailableFontFamilyNames();
             System.out.println("[MiniProxy] Fonts available: " + fonts.length);
-            int shown = 0;
-            for (String f : fonts) {
-                System.out.println("  ✓ " + f);
-                if (++shown >= 5) break;
-            }
             if (fonts.length == 0) {
-                System.err.println();
-                System.err.println("════════════════════════════════════════");
-                System.err.println("!!! KHÔNG CÓ FONT NÀO !!!");
-                System.err.println("Trang sẽ hiển thị toàn hộp vuông (tofu).");
-                System.err.println("Sửa: pkg install fontconfig ttf-dejavu");
-                System.err.println("════════════════════════════════════════");
+                System.err.println("!!! KHÔNG CÓ FONT — cài: pkg install fontconfig ttf-dejavu");
             }
-        } catch (Throwable t) {
-            System.err.println("[MiniProxy] Font check lỗi: " + t);
-        }
+        } catch (Throwable t) {}
     }
 
     static void ensureTempDir() {
@@ -99,6 +94,7 @@ public class MiniProxy {
         catch (IllegalArgumentException e) { return new URL(spec); }
     }
 
+    // ── Protocol handler ──
     static void handle(Socket s) {
         DataInputStream in = null;
         DataOutputStream out = null;
@@ -120,6 +116,7 @@ public class MiniProxy {
                 page = errorPage("Lỗi render: " + e.getMessage());
             }
 
+            // Gửi ảnh đã tối ưu
             out.writeInt(page.image.getWidth());
             out.writeInt(page.image.getHeight());
             ByteArrayOutputStream imgBuf = new ByteArrayOutputStream();
@@ -145,54 +142,37 @@ public class MiniProxy {
         }
     }
 
+    // ── Render chính ──
     static Page render(String url) throws Exception {
         String html = fetchHtml(url);
 
-        // 1. HTML → XHTML
+        // 1. HTML → XHTML qua jsoup
         org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, url);
-        jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas,svg").remove();
+        jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas").remove();
         jsoupDoc.outputSettings()
                 .syntax(org.jsoup.nodes.Document.OutputSettings.Syntax.xml)
                 .charset("UTF-8")
                 .escapeMode(org.jsoup.nodes.Entities.EscapeMode.xhtml)
                 .prettyPrint(false);
 
-        String xhtml = jsoupDoc.outerHtml();
-        // Bỏ HTML5 doctype (invalid với XHTML)
-        xhtml = xhtml.replaceFirst("(?i)<!DOCTYPE[^>]*>", "").trim();
-
-        // ── Đảm bảo <html> có xmlns (nếu thiếu, FS coi là XML generic → render text) ──
-        int htmlTagStart = xhtml.toLowerCase().indexOf("<html");
-        if (htmlTagStart < 0) {
-            throw new IOException("Không tìm thấy <html> — nội dung không phải HTML?");
+        String xhtml = jsoupDoc.outerHtml().replaceFirst("(?i)<!DOCTYPE[^>]*>", "").trim();
+        if (!xhtml.toLowerCase().contains("xmlns=")) {
+            xhtml = xhtml.replaceFirst("(?i)<html", "<html xmlns=\"http://www.w3.org/1999/xhtml\"");
         }
-        int htmlTagEnd = xhtml.indexOf('>', htmlTagStart);
-        if (htmlTagEnd < 0) {
-            throw new IOException("<html> không đóng — HTML hỏng?");
-        }
-        String htmlOpenTag = xhtml.substring(htmlTagStart, htmlTagEnd);
-        if (!htmlOpenTag.toLowerCase().contains("xmlns=")) {
-            xhtml = xhtml.substring(0, htmlTagEnd) +
-                " xmlns=\"http://www.w3.org/1999/xhtml\"" +
-                xhtml.substring(htmlTagEnd);
-        }
-
-        // Thêm XML declaration nếu thiếu
-        if (!xhtml.trim().startsWith("<?xml")) {
+        if (!xhtml.startsWith("<?xml")) {
             xhtml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + xhtml;
         }
 
-        // 2. Parse XML — thử namespaceAware trước, fallback nếu fail
-        Document dom = null;
+        // 2. Parse XML
+        Document dom;
         try {
             dom = parseXml(xhtml, true);
         } catch (Exception e1) {
-            System.err.println("[MiniProxy] namespaceAware=true fail: " + e1.getMessage());
-            System.err.println("[MiniProxy] XHTML đầu: " + xhtml.substring(0, Math.min(300, xhtml.length())));
+            System.err.println("namespaceAware=true fail: " + e1.getMessage());
             dom = parseXml(xhtml, false);
         }
 
-        // 3. Render
+        // 3. Render với Graphics2DRenderer
         Graphics2DRenderer renderer = new Graphics2DRenderer();
         renderer.setDocument(dom, url);
         renderer.getSharedContext().setUserAgentCallback(new ProxyUserAgent());
@@ -217,20 +197,18 @@ public class MiniProxy {
             if (minSize != null && minSize.height > 0) {
                 usedH = Math.min(RENDER_HEIGHT, minSize.height + 12);
             }
-        } catch (Exception e) {
-            System.err.println("[MiniProxy] getMinimumSize fail: " + e);
-        }
-        if (usedH < 40) {
-            System.err.println("[MiniProxy] WARN: ảnh chỉ cao " + usedH + "px — HTML có thể không render được. Kiểm tra font!");
-            usedH = 40;
-        }
+        } catch (Exception e) {}
+        if (usedH < 40) usedH = 40;
 
         BufferedImage result = new BufferedImage(PAGE_WIDTH, usedH, BufferedImage.TYPE_INT_RGB);
         Graphics2D rg = result.createGraphics();
         rg.drawImage(fullImg, 0, 0, null);
         rg.dispose();
 
-        // 5. Links
+        // 5. TỐI ƯU PNG: quantize xuống 256 màu
+        result = quantizeToIndexed(result);
+
+        // 6. Links
         List<Link> links = new ArrayList<>();
         try {
             Field panelField = Graphics2DRenderer.class.getDeclaredField("panel");
@@ -240,10 +218,38 @@ public class MiniProxy {
             Box root = (Box) getRootBox.invoke(panel);
             if (root != null) collectLinks(root, links, url);
         } catch (Exception e) {
-            System.err.println("[MiniProxy] Link extract fail: " + e);
+            System.err.println("Link extract fail: " + e);
         }
 
         return new Page(result, links);
+    }
+
+    // ── Quantize PNG: giảm màu để giảm kích thước ──
+    static BufferedImage quantizeToIndexed(BufferedImage src) {
+        int w = src.getWidth(), h = src.getHeight();
+        // Tạo bảng màu 256 màu (web-safe 6x6x6 + vài màu xám)
+        byte[] r = new byte[256], g = new byte[256], b = new byte[256];
+        int idx = 0;
+        for (int ri = 0; ri < 6; ri++)
+            for (int gi = 0; gi < 6; gi++)
+                for (int bi = 0; bi < 6; bi++) {
+                    r[idx] = (byte)(ri * 51);
+                    g[idx] = (byte)(gi * 51);
+                    b[idx] = (byte)(bi * 51);
+                    idx++;
+                }
+        // Thêm 40 mức xám
+        for (int i = 0; i < 40; i++) {
+            byte v = (byte)(i * 6);
+            r[idx] = g[idx] = b[idx] = v;
+            idx++;
+        }
+        IndexColorModel cm = new IndexColorModel(8, 256, r, g, b);
+        BufferedImage indexed = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_INDEXED, cm);
+        Graphics2D g2 = indexed.createGraphics();
+        g2.drawImage(src, 0, 0, null);
+        g2.dispose();
+        return indexed;
     }
 
     static Document parseXml(String xhtml, boolean nsAware) throws Exception {
@@ -252,8 +258,6 @@ public class MiniProxy {
         dbf.setValidating(false);
         dbf.setExpandEntityReferences(false);
         try { dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false); } catch (Exception ignore) {}
-        try { dbf.setFeature("http://xml.org/sax/features/external-general-entities", false); } catch (Exception ignore) {}
-        try { dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false); } catch (Exception ignore) {}
         return dbf.newDocumentBuilder()
                   .parse(new org.xml.sax.InputSource(new StringReader(xhtml)));
     }
@@ -305,8 +309,6 @@ public class MiniProxy {
             g.drawString(m.substring(i, end), 10, y);
             y += 14; i = end;
         }
-        g.setColor(new Color(120, 120, 120));
-        g.drawString("Kiểm tra log server", 10, 210);
         g.dispose();
         return new Page(img, new ArrayList<Link>());
     }
@@ -347,7 +349,6 @@ public class MiniProxy {
                 c.setInstanceFollowRedirects(true);
                 return c.getInputStream();
             } catch (IOException e) {
-                System.err.println("UA skip: " + uri + " (" + e.getMessage() + ")");
                 return null;
             }
         }
