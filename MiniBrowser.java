@@ -7,26 +7,33 @@ import java.util.*;
 
 public class MiniBrowser extends MIDlet implements CommandListener {
 
-    // ── Giá trị mặc định (ghi đè bởi cấu hình đã lưu) ──
     static final String DEFAULT_HOST = "192.168.1.100";
     static final int DEFAULT_PORT = 9999;
     static final String RMS_NAME = "MiniBrowserCfg";
+    static final int CACHE_MAX = 10;
 
-    // ── Biến cấu hình runtime ──
     static String proxyHost = DEFAULT_HOST;
     static int proxyPort = DEFAULT_PORT;
 
     Display display;
     BrowserCanvas canvas;
-    Command exitCmd, openCmd, backCmd, refreshCmd, settingsCmd;
+    Command exitCmd, openCmd, backCmd, refreshCmd, settingsCmd, stopCmd;
     String currentUrl = "http://example.com/";
     Vector history = new Vector();
     boolean firstRun = false;
 
+    // ── Cache + stop ──
+    Hashtable cache = new Hashtable();
+    volatile boolean stopRequested = false;
+    volatile SocketConnection currentConnection = null;
+
+    static class PageData {
+        Image img; Vector links;
+        PageData(Image i, Vector l) { img = i; links = l; }
+    }
+
     public void startApp() {
         display = Display.getDisplay(this);
-
-        // Nạp cấu hình đã lưu trước khi làm bất cứ điều gì
         firstRun = !loadSettings();
 
         exitCmd     = new Command("Thoát", Command.EXIT, 1);
@@ -34,6 +41,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         backCmd     = new Command("Lùi", Command.BACK, 2);
         refreshCmd  = new Command("Tải lại", Command.SCREEN, 3);
         settingsCmd = new Command("Cấu hình", Command.SCREEN, 4);
+        stopCmd     = new Command("Dừng", Command.STOP, 1);
 
         canvas = new BrowserCanvas(this);
         canvas.addCommand(exitCmd);
@@ -41,12 +49,12 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         canvas.addCommand(backCmd);
         canvas.addCommand(refreshCmd);
         canvas.addCommand(settingsCmd);
+        canvas.addCommand(stopCmd);
         canvas.setCommandListener(this);
 
         display.setCurrent(canvas);
 
         if (firstRun) {
-            // Lần đầu: nhắc người dùng cấu hình proxy trước
             canvas.setStatus("Chưa cấu hình proxy — mở menu > Cấu hình");
             promptSettings();
         } else {
@@ -55,17 +63,24 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     }
 
     public void pauseApp() {}
-    public void destroyApp(boolean u) {}
+    public void destroyApp(boolean u) {
+        abortCurrent();
+    }
 
     public void commandAction(Command c, Displayable d) {
         if (c == exitCmd) {
+            abortCurrent();
             notifyDestroyed();
         } else if (c == openCmd) {
             promptUrl();
         } else if (c == refreshCmd) {
+            cache.remove(currentUrl);   // buộc tải lại tươi
             loadAsync(currentUrl);
         } else if (c == settingsCmd) {
             promptSettings();
+        } else if (c == stopCmd) {
+            abortCurrent();
+            canvas.setStatus("Đã dừng");
         } else if (c == backCmd) {
             if (!history.isEmpty()) {
                 currentUrl = (String) history.lastElement();
@@ -75,14 +90,8 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════
-    //  RMS: lưu / nạp cấu hình
-    // ═══════════════════════════════════════════════════════════
+    // ── RMS ──
 
-    /**
-     * Nạp cấu hình từ RecordStore.
-     * @return true nếu đã có cấu hình lưu sẵn, false nếu đây là lần đầu.
-     */
     boolean loadSettings() {
         RecordStore rs = null;
         boolean exists = false;
@@ -106,7 +115,6 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         return exists;
     }
 
-    /** Ghi cấu hình hiện tại vào RMS (ghi đè nếu đã có). */
     void saveSettings() {
         RecordStore rs = null;
         try {
@@ -124,9 +132,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════
-    //  Màn hình Cấu hình proxy
-    // ═══════════════════════════════════════════════════════════
+    // ── Cấu hình proxy ──
 
     void promptSettings() {
         final String initial = proxyHost + ":" + proxyPort;
@@ -153,7 +159,6 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         display.setCurrent(tb);
     }
 
-    /** Parse "host:port" (hoặc chỉ "host" → port mặc định 9999), validate, lưu. */
     void applyProxyInput(String raw) {
         String s = raw.trim();
         if (s.length() == 0) {
@@ -161,12 +166,9 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             display.setCurrent(canvas);
             return;
         }
-
         String newHost;
         int newPort;
         int idx = s.lastIndexOf(':');
-
-        // Không có ':' hoặc ':' ở vị trí đầu → dùng port mặc định
         if (idx <= 0 || idx == s.length() - 1) {
             newHost = s;
             newPort = DEFAULT_PORT;
@@ -180,13 +182,11 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                 return;
             }
         }
-
         if (newHost.length() == 0 || newPort < 1 || newPort > 65535) {
             canvas.setStatus("Host/port không hợp lệ");
             display.setCurrent(canvas);
             return;
         }
-
         proxyHost = newHost;
         proxyPort = newPort;
         saveSettings();
@@ -194,9 +194,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         display.setCurrent(canvas);
     }
 
-    // ═══════════════════════════════════════════════════════════
-    //  Tải URL
-    // ═══════════════════════════════════════════════════════════
+    // ── Tải URL ──
 
     void promptUrl() {
         final TextBox tb = new TextBox("Nhập URL:", currentUrl, 200, TextField.URL);
@@ -217,20 +215,44 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         display.setCurrent(tb);
     }
 
+    /** Hủy request đang chạy (nếu có). */
+    synchronized void abortCurrent() {
+        stopRequested = true;
+        SocketConnection old = currentConnection;
+        currentConnection = null;
+        if (old != null) {
+            try { old.close(); } catch (Exception e) {}
+        }
+    }
+
     void loadAsync(final String url) {
+        abortCurrent();
         new Thread(new Runnable() {
             public void run() { loadUrl(url); }
         }).start();
     }
 
     void loadUrl(String url) {
-        // Hiển thị proxy đang dùng để dễ debug
-        canvas.setStatus("Qua " + proxyHost + ":" + proxyPort + " — " + url);
+        // Cache hit → hiển thị ngay
+        PageData cached = (PageData) cache.get(url);
+        if (cached != null) {
+            canvas.setPage(cached.img, cached.links);
+            canvas.setStatus(url + " [cache]");
+            return;
+        }
 
+        stopRequested = false;
         SocketConnection sc = null;
         try {
             sc = (SocketConnection) Connector.open(
                 "socket://" + proxyHost + ":" + proxyPort);
+
+            synchronized (this) {
+                if (stopRequested) { sc.close(); return; }
+                currentConnection = sc;
+            }
+
+            canvas.setStatus("Qua " + proxyHost + ":" + proxyPort + " — " + url);
 
             DataOutputStream out = new DataOutputStream(sc.openOutputStream());
             byte[] ub = url.getBytes("UTF-8");
@@ -257,17 +279,34 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                 in.readFully(ubb);
                 links.addElement(new LinkRect(x1, y1, x2, y2, new String(ubb, "UTF-8")));
             }
-            sc.close();
+
+            synchronized (this) {
+                if (currentConnection == sc) currentConnection = null;
+            }
+            try { sc.close(); } catch (Exception e) {}
             sc = null;
 
+            if (stopRequested) return;
+
             Image img = Image.createImage(imgData, 0, imgData.length);
+            PageData pd = new PageData(img, links);
+            if (cache.size() > CACHE_MAX) cache.clear();
+            cache.put(url, pd);
+
             canvas.setPage(img, links);
             canvas.setStatus(url);
         } catch (Exception e) {
-            canvas.setStatus("Lỗi: " + e.getMessage());
-            e.printStackTrace();
+            if (stopRequested) {
+                canvas.setStatus("Đã dừng");
+            } else {
+                canvas.setStatus("Lỗi: " + e.getMessage());
+                e.printStackTrace();
+            }
         } finally {
             if (sc != null) try { sc.close(); } catch (Exception e) {}
+            synchronized (this) {
+                if (currentConnection == sc) currentConnection = null;
+            }
         }
     }
 
@@ -276,10 +315,6 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         LinkRect(int a, int b, int c, int d, String u) { x1=a; y1=b; x2=c; y2=d; url=u; }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  BrowserCanvas — không đổi nhiều, chỉ tăng chiều cao status bar
-// ═══════════════════════════════════════════════════════════════
 
 class BrowserCanvas extends Canvas {
     MiniBrowser midlet;
