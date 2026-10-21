@@ -2,6 +2,7 @@ package com.minibrowser;
 
 import android.content.Context;
 import android.graphics.*;
+import android.graphics.Paint.FontMetrics;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.AttributeSet;
@@ -48,9 +49,6 @@ public class BrowserView extends View {
     public Tab tab = new Tab();
     public Vector<String[]> speedDial = new Vector<>();
 
-    // cache of content size
-    private int lastContentW, lastContentH;
-
     public BrowserView(Context c) { super(c); init(); }
     public BrowserView(Context c, AttributeSet a) { super(c, a); init(); }
 
@@ -90,7 +88,6 @@ public class BrowserView extends View {
         if (loadingTicker != null) { ui.removeCallbacks(loadingTicker); loadingTicker = null; }
     }
 
-    // ── layout helpers ──
     private int urlBarH() { return (int)(Math.max(16, -fm.ascent + fm.descent + 6)); }
     private int softBarH() { return (int)(Math.max(22, -fm.ascent + fm.descent + 8)); }
     private int contentTop() { return urlBarH(); }
@@ -101,12 +98,10 @@ public class BrowserView extends View {
     protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
         if (tab.bitmap != null && tab.bitmap.getWidth() != w && listener != null) {
-            // rotate → ask activity to reload
             listener.onReloadClicked();
         }
     }
 
-    // ── drawing ──
     @Override
     protected void onDraw(Canvas g) {
         super.onDraw(g);
@@ -263,7 +258,6 @@ public class BrowserView extends View {
         return s + "…";
     }
 
-    // ── scrolling ──
     public void scroll(int dy) {
         if (tab.bitmap == null) return;
         tab.scrollY += dy;
@@ -273,7 +267,6 @@ public class BrowserView extends View {
         invalidate();
     }
 
-    // ── hit test ──
     int linkAt(int x, int y) {
         if (tab.bitmap == null || tab.links == null) return -1;
         int pad = Math.max(4, getWidth() / 40);
@@ -292,7 +285,6 @@ public class BrowserView extends View {
         return best;
     }
 
-    // ── touch ──
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         int x = (int) e.getX(), y = (int) e.getY();
@@ -312,7 +304,7 @@ public class BrowserView extends View {
                 if (!isDragging) {
                     if (Math.abs(x - pressX) <= slop && Math.abs(y - pressY) <= slop) return true;
                     isDragging = true;
-                    cancelLongPress();
+                    cancelLongPressTask();
                     selectedLink = -1;
                     lastDragY = pressY;
                     lastDragTime = System.currentTimeMillis();
@@ -330,7 +322,7 @@ public class BrowserView extends View {
                 return true;
 
             case MotionEvent.ACTION_UP:
-                cancelLongPress();
+                cancelLongPressTask();
                 if (longPressed) { selectedLink = -1; invalidate(); return true; }
                 if (isDragging) {
                     if (Math.abs(velocity) > 1.5f) applyMomentum(velocity);
@@ -353,7 +345,7 @@ public class BrowserView extends View {
     }
 
     private void scheduleLongPress(final int x, final int y) {
-        cancelLongPress();
+        cancelLongPressTask();
         longPressTask = () -> {
             if (!isDragging) {
                 longPressed = true;
@@ -366,7 +358,7 @@ public class BrowserView extends View {
         ui.postDelayed(longPressTask, 500);
     }
 
-    private void cancelLongPress() {
+    private void cancelLongPressTask() {
         if (longPressTask != null) { ui.removeCallbacks(longPressTask); longPressTask = null; }
     }
 
@@ -432,7 +424,6 @@ public class BrowserView extends View {
         invalidate();
     }
 
-    // ── d-pad ──
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent e) {
         if (tab.bitmap == null) {
