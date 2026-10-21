@@ -20,7 +20,7 @@ import org.xhtmlrenderer.simple.Graphics2DRenderer;
 import org.xhtmlrenderer.swing.NaiveUserAgent;
 
 /**
- * MiniProxy v6.0 — proxy render trang web thành ảnh PNG + danh sách vùng link cho MiniBrowser (J2ME).
+ * MiniProxy v6.1 — proxy render trang web thành ảnh PNG + danh sách vùng link cho MiniBrowser (J2ME).
  *
  * Giao thức (không đổi so với v5):
  *   client → proxy : int screenW, int screenH, int urlLen, byte[] url (UTF-8)
@@ -28,11 +28,18 @@ import org.xhtmlrenderer.swing.NaiveUserAgent;
  *                    { int x1, y1, x2, y2, int urlLen, byte[] url } * linkCount
  *
  * Biến môi trường (tuỳ chọn):
- *   MINIPROXY_PORT       cổng (mặc định 9999, hoặc tham số dòng lệnh đầu tiên)
- *   MINIPROXY_CHROME     đường dẫn Chrome/Chromium
- *   MINIPROXY_NO_CHROME  =1 để chỉ dùng Flying Saucer
- *   MINIPROXY_SANDBOX    =1 để KHÔNG truyền --no-sandbox cho Chrome
- *   MINIPROXY_BLOCK_LAN  =1 để chặn truy cập địa chỉ nội bộ (localhost, 192.168.x.x ...)
+ *   MINIPROXY_PORT        cổng (mặc định 9999, hoặc tham số dòng lệnh đầu tiên)
+ *   MINIPROXY_CHROME      đường dẫn Chrome/Chromium
+ *   MINIPROXY_NO_CHROME   =1 để chỉ dùng Flying Saucer
+ *   MINIPROXY_SANDBOX     =1 để KHÔNG truyền --no-sandbox cho Chrome
+ *   MINIPROXY_BLOCK_LAN   =1 để chặn truy cập địa chỉ nội bộ (192.168.x.x, 10.x, 172.16-31.x ...)
+ *   MINIPROXY_ALLOW_LOCAL =1 để cho phép loopback (localhost/127.0.0.1) — vẫn chặn proxy tự gọi chính nó
+ *
+ * Fixes v6.1:
+ *   - Chặn redirect về 127.0.0.1 / localhost / ::1 mặc định (tránh SSRF + redirect-loop self-loop)
+ *   - Chặn DNS rebinding: hostname trỏ về loopback cũng bị chặn
+ *   - Loop detection trong redirect chain bỏ qua query/fragment (server thêm token random)
+ *   - Encode URL lỏng khi gặp space/Unicode/lone % → không fail ở URI.create
  */
 public class MiniProxy {
     static final int DEFAULT_PORT = 9999;
@@ -42,7 +49,7 @@ public class MiniProxy {
     static final int MAX_URL_LEN = 4096;
     static final int MAX_REDIRECTS = 8;
     static final int MAX_BODY = 4 * 1024 * 1024;
-    static final int MAX_LINKS = 400;
+    static final int MAX_LINKS = 40;
     static final int MAX_PNG = 4500 * 1024;         // client từ chối > 5 MB
     static final int CHROME_TIMEOUT_S = 40;
 
@@ -53,6 +60,8 @@ public class MiniProxy {
     static final boolean NO_CHROME  = "1".equals(System.getenv("MINIPROXY_NO_CHROME"));
     static final boolean USE_SANDBOX = "1".equals(System.getenv("MINIPROXY_SANDBOX"));
     static final boolean BLOCK_LAN  = "1".equals(System.getenv("MINIPROXY_BLOCK_LAN"));
+    static final boolean ALLOW_LOCAL = "1".equals(System.getenv("MINIPROXY_ALLOW_LOCAL"));
+    static volatile int PROXY_PORT = DEFAULT_PORT;
 
     static final Semaphore RENDER_SLOTS = new Semaphore(2, true);
     static final ExecutorService POOL = Executors.newFixedThreadPool(16);
@@ -71,8 +80,6 @@ public class MiniProxy {
 
     static final Pattern ATTR_NAME = Pattern.compile("^[A-Za-z_][A-Za-z0-9_.:\\-]*$");
 
-    // Script chạy TRONG Chrome (chỉ ở lượt đo, khi URL có #measure): ghi chiều cao trang và
-    // toạ độ thật của từng <a> vào DOM để Java đọc lại bằng --dump-dom.
     static final String MEASURE_JS =
         "<script>(function(){" +
         "function run(){try{" +
@@ -120,6 +127,7 @@ public class MiniProxy {
         } catch (NumberFormatException e) {
             System.err.println("Cổng không hợp lệ, dùng " + DEFAULT_PORT);
         }
+        PROXY_PORT = port;
 
         ensureTempDir();
         checkFonts();
@@ -127,9 +135,10 @@ public class MiniProxy {
 
         String chrome = NO_CHROME ? null : findChrome();
         ServerSocket ss = new ServerSocket(port, 50, InetAddress.getByName("0.0.0.0"));
-        System.out.println("MiniProxy v6.0 listening on " + port
+        System.out.println("MiniProxy v6.1 listening on " + port
             + " | chrome=" + (chrome == null ? "không (dùng Flying Saucer)" : chrome)
-            + " | blockLan=" + BLOCK_LAN);
+            + " | blockLan=" + BLOCK_LAN
+            + " | allowLocal=" + ALLOW_LOCAL);
         while (true) {
             final Socket s = ss.accept();
             try {
@@ -187,7 +196,7 @@ public class MiniProxy {
         DataInputStream in = null;
         DataOutputStream out = null;
         try {
-            s.setSoTimeout(15000);   // client không gửi đủ request → thả kết nối
+            s.setSoTimeout(15000);
             in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
             out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
 
@@ -238,7 +247,7 @@ public class MiniProxy {
             ImageIO.write(img, "png", bo);
             png = bo.toByteArray();
             if (png.length <= MAX_PNG || img.getHeight() <= 400) break;
-            img = crop(img, img.getHeight() * 3 / 4);     // PNG quá lớn → cắt bớt phần cuối
+            img = crop(img, img.getHeight() * 3 / 4);
             links = clipLinks(links, img.getWidth(), img.getHeight());
         }
         out.writeInt(img.getWidth());
@@ -284,11 +293,6 @@ public class MiniProxy {
         return renderWithFlyingSaucer(doc, f.url, renderW);
     }
 
-    // ── Headless Chrome: 2 lượt (đo toạ độ link + chụp ảnh toàn trang) ──
-    // Trang HTML được tải bằng Java (UA Opera Mini, cookie, redirect), bỏ hết <script> của trang,
-    // lưu ra file tạm có <base href>, rồi Chrome chỉ dựng layout + chụp. Nhờ vậy:
-    //  - không chạy JS lạ của website trong Chrome (--no-sandbox an toàn hơn),
-    //  - toạ độ link lấy trực tiếp từ DOM nên khớp 100% với ảnh chụp.
     static Page renderWithChrome(String chrome, org.jsoup.nodes.Document doc, String baseUrl, int renderW) throws Exception {
         prepareForChrome(doc, baseUrl);
         String html = doc.outerHtml();
@@ -305,7 +309,6 @@ public class MiniProxy {
             String fileUrl = toFileUrl(htmlFile);
             int winH = 1150;
 
-            // Lượt 1: đo
             List<String> c1 = chromeCmd(chrome, profile, renderW, winH);
             c1.add("--virtual-time-budget=6000");
             c1.add("--dump-dom");
@@ -327,7 +330,6 @@ public class MiniProxy {
                 } catch (NumberFormatException ignore) {}
             }
 
-            // Lượt 2: chụp ảnh (cửa sổ cao hơn 150px để bù khung trình duyệt của new-headless)
             List<String> c2 = chromeCmd(chrome, profile, renderW, Math.max(winH, usedH + 150));
             c2.add("--virtual-time-budget=4000");
             c2.add("--screenshot=" + shot.getAbsolutePath());
@@ -337,7 +339,6 @@ public class MiniProxy {
             BufferedImage img = ImageIO.read(shot);
             if (img == null) throw new IOException("Không đọc được ảnh Chrome");
 
-            // Cắt theo chiều cao đo được rồi bỏ phần trắng thừa ở cuối
             int h = Math.min(img.getHeight(), usedH);
             h = Math.min(h, lastContentRow(img, h) + 24);
             h = Math.max(h, Math.min(100, img.getHeight()));
@@ -402,7 +403,6 @@ public class MiniProxy {
         return c;
     }
 
-    // Chạy Chrome, stdout/stderr ghi ra file tạm (tránh treo pipe khi tiến trình con còn sống)
     static byte[] runChrome(List<String> cmd, boolean capture) throws Exception {
         File outF = File.createTempFile("j2me_out_", ".txt");
         File errF = File.createTempFile("j2me_err_", ".txt");
@@ -449,9 +449,9 @@ public class MiniProxy {
     }
 
     static String toFileUrl(File f) {
-        String u = f.toURI().toString();              // file:/tmp/x.html
+        String u = f.toURI().toString();
         if (u.startsWith("file:/") && !u.startsWith("file://")) u = "file://" + u.substring(5);
-        return u;                                     // file:///tmp/x.html
+        return u;
     }
 
     static void deleteRecursive(File f) {
@@ -488,7 +488,6 @@ public class MiniProxy {
         return null;
     }
 
-    // ── Flying Saucer (dự phòng khi không có Chrome) ──
     static Page renderWithFlyingSaucer(org.jsoup.nodes.Document doc, String finalUrl, int renderW) throws Exception {
         List<Anchor> anchors = collectAnchors(doc, finalUrl);
 
@@ -497,7 +496,6 @@ public class MiniProxy {
             for (org.jsoup.nodes.Node n : new ArrayList<org.jsoup.nodes.Node>(el.childNodes())) {
                 if (n instanceof org.jsoup.nodes.Comment) n.remove();
             }
-            // Thuộc tính tên lạ (@click, :class, xlink:href...) làm hỏng XML
             List<String> rm = new ArrayList<>();
             for (org.jsoup.nodes.Attribute at : el.attributes()) {
                 String k = at.getKey();
@@ -573,7 +571,6 @@ public class MiniProxy {
         rg.drawImage(fullImg, 0, 0, null);
         rg.dispose();
 
-        // Link từ cây box của Flying Saucer (chỉ thấy link dạng block/inline-block)
         List<Link> links = new ArrayList<>();
         try {
             Field panelField = Graphics2DRenderer.class.getDeclaredField("panel");
@@ -587,8 +584,6 @@ public class MiniProxy {
             System.err.println("  FS link extract fail: " + e.getMessage());
         }
 
-        // Nếu FS bỏ sót nhiều link (link inline) → thêm bảng "Liên kết" cuối trang với toạ độ do ta tự vẽ,
-        // nên luôn khớp với ảnh (khác bản cũ: toạ độ bịa không trùng chỗ nào trên ảnh).
         Set<String> distinct = new HashSet<>();
         for (Anchor a : anchors) distinct.add(a.url);
         Page page;
@@ -693,7 +688,7 @@ public class MiniProxy {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  Tải trang: redirect HTTP (kể cả http→https), meta refresh, JS redirect
+    //  Tải trang: redirect HTTP, meta refresh, JS redirect
     // ═══════════════════════════════════════════════════════════
     static class Fetched { String html; String url; }
 
@@ -702,7 +697,20 @@ public class MiniProxy {
         for (int i = 0; i < MAX_REDIRECTS; i++) {
             String decoded = decodeGoogleRedirect(url);
             if (decoded != null) { System.out.println("  Google decode: " + decoded); url = decoded; }
-            if (!seen.add(url)) throw new IOException("Vòng lặp chuyển hướng: " + url);
+
+            // Khoá loop = scheme://host:port/path — bỏ query/fragment vì server hay thêm token random
+            // mỗi lần redirect (nếu dùng full URL thì không bắt được loop vô hạn).
+            String key;
+            try {
+                URI uu = URI.create(url);
+                key = uu.getScheme() + "://" + uu.getHost()
+                    + (uu.getPort() > 0 ? ":" + uu.getPort() : "")
+                    + (uu.getPath() == null ? "" : uu.getPath());
+            } catch (Exception e) {
+                key = url;
+            }
+            if (!seen.add(key))
+                throw new IOException("Vòng lặp chuyển hướng: " + url);
 
             Fetched f = fetchPage(url);
             String next = findClientRedirect(f.html, f.url);
@@ -716,8 +724,6 @@ public class MiniProxy {
         throw new IOException("Quá nhiều chuyển hướng");
     }
 
-    // HttpURLConnection KHÔNG tự theo redirect khác giao thức (http → https) nên phải tự xử lý.
-    // Trước đây http://vnexpress.net → https trả về thân rỗng → trang trắng.
     static Fetched fetchPage(String startUrl) throws Exception {
         String url = startUrl;
         for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -760,7 +766,7 @@ public class MiniProxy {
             int n;
             while ((n = is.read(b)) > 0) {
                 buf.write(b, 0, n);
-                if (buf.size() >= limit) break;     // cắt bớt trang quá lớn thay vì tràn heap
+                if (buf.size() >= limit) break;
             }
             return buf.toByteArray();
         } finally {
@@ -792,8 +798,6 @@ public class MiniProxy {
         return new String(body, off, body.length - off, c);
     }
 
-    // meta refresh (ngoài <noscript>) và JS redirect (chỉ khi trang gần như rỗng — tránh nhận nhầm
-    // đoạn "location.href=..." nằm trong script bình thường)
     static String findClientRedirect(String html, String base) {
         try {
             String sample = html.length() > 20000 ? html.substring(0, 20000) : html;
@@ -845,9 +849,10 @@ public class MiniProxy {
     // ═══════════════════════════════════════════════════════════
     static String normalizeUrl(String u) {
         u = u == null ? "" : u.trim();
+        if (u.length() == 0) return u;
         if (u.startsWith("//")) u = "http:" + u;
         else if (u.indexOf("://") < 0) u = "http://" + u;
-        return u;
+        return encodeUrlLoose(u);
     }
 
     static boolean isHttp(String u) {
@@ -856,41 +861,140 @@ public class MiniProxy {
         return l.startsWith("http://") || l.startsWith("https://");
     }
 
-    // Chỉ cho http/https. Trước đây client có thể gửi file:///etc/passwd để Chrome chụp lại.
+    // Chỉ cho http/https. Chặn loopback mặc định (127.0.0.1, ::1, localhost) để tránh SSRF
+    // và redirect-loop khi proxy tự gọi chính nó. DNS rebinding (hostname trỏ về 127.0.0.1)
+    // cũng bị chặn bằng cách resolve rồi kiểm tra.
+    // Nếu cần test dev local: set MINIPROXY_ALLOW_LOCAL=1, nhưng vẫn không cho gọi chính proxy.
     static void checkUrl(String url) throws IOException {
         URL u;
         try { u = toURL(url); }
         catch (Exception e) { throw new IOException("URL không hợp lệ: " + url); }
+
         String p = u.getProtocol();
         if (!"http".equalsIgnoreCase(p) && !"https".equalsIgnoreCase(p))
             throw new IOException("Chỉ hỗ trợ http/https");
+
         String host = u.getHost();
         if (host == null || host.length() == 0) throw new IOException("Thiếu tên miền");
-        if (BLOCK_LAN) {
-            for (InetAddress a : InetAddress.getAllByName(host)) {
-                if (a.isAnyLocalAddress() || a.isLoopbackAddress() || a.isSiteLocalAddress() || a.isLinkLocalAddress())
-                    throw new IOException("Địa chỉ nội bộ bị chặn");
+
+        boolean isLoopbackName = "localhost".equalsIgnoreCase(host)
+                              || "127.0.0.1".equals(host)
+                              || "0.0.0.0".equals(host)
+                              || "::1".equals(host)
+                              || "[::1]".equals(host);
+        int effPort = u.getPort() < 0
+            ? ("https".equalsIgnoreCase(p) ? 443 : 80)
+            : u.getPort();
+
+        if (isLoopbackName) {
+            if (!ALLOW_LOCAL)
+                throw new IOException("Địa chỉ loopback bị chặn: " + host);
+            if (effPort == PROXY_PORT)
+                throw new IOException("Không thể truy cập chính proxy (" + host + ":" + PROXY_PORT + ")");
+        }
+
+        // DNS check: chỉ resolve khi thật sự cần — tránh chậm request khi mọi protection tắt
+        if (!ALLOW_LOCAL || BLOCK_LAN) {
+            InetAddress[] addrs;
+            try { addrs = InetAddress.getAllByName(host); }
+            catch (UnknownHostException e) { return; }   // fetchPage sẽ báo lỗi tự nhiên
+            for (InetAddress a : addrs) {
+                boolean isLoop = a.isAnyLocalAddress() || a.isLoopbackAddress();
+                if (isLoop) {
+                    if (!ALLOW_LOCAL)
+                        throw new IOException("Địa chỉ loopback bị chặn: " + host);
+                    if (effPort == PROXY_PORT)
+                        throw new IOException("Không thể truy cập chính proxy (" + host + ":" + PROXY_PORT + ")");
+                }
+                if (BLOCK_LAN && (a.isSiteLocalAddress() || a.isLinkLocalAddress()))
+                    throw new IOException("Địa chỉ nội bộ bị chặn: " + host);
             }
         }
     }
 
     @SuppressWarnings("deprecation")
     static URL toURL(String spec) throws MalformedURLException {
-        try { return URI.create(spec).toURL(); }
-        catch (IllegalArgumentException e) { return new URL(spec); }
-    }
-
-    static String resolveUrl(String base, String href) {
-        try { return URI.create(base).resolve(href).toString(); }
-        catch (Exception e) {
-            try { return new URL(new URL(base), href).toString(); }
-            catch (Exception e2) { return href; }
+        if (spec == null || spec.length() == 0)
+            throw new MalformedURLException("URL rỗng");
+        try {
+            return URI.create(spec).toURL();
+        } catch (IllegalArgumentException | MalformedURLException e) {
+            try {
+                return URI.create(encodeUrlLoose(spec)).toURL();
+            } catch (Exception e2) {
+                try {
+                    return new URL(spec);
+                } catch (MalformedURLException e3) {
+                    throw new MalformedURLException("URL không hợp lệ: " + spec);
+                }
+            }
         }
     }
 
-    // Ép một số site lớn sang bản nhẹ. So khớp theo HOST (bản cũ so khớp cả chuỗi URL nên
-    // http://abc.com/?u=www.google.com cũng bị viết lại sai). Google không còn bị viết lại:
-    // google.com tự phục vụ bản nhẹ cho UA Opera Mini.
+    static String resolveUrl(String base, String href) {
+        if (href == null) return base;
+        href = href.trim();
+        if (href.length() == 0) return base;
+        try {
+            return URI.create(base).resolve(href).toString();
+        } catch (IllegalArgumentException e) {
+            try {
+                return URI.create(encodeUrlLoose(base))
+                           .resolve(encodeUrlLoose(href)).toString();
+            } catch (Exception e2) {
+                try { return new URL(new URL(base), href).toString(); }
+                catch (Exception e3) { return href; }
+            }
+        }
+    }
+
+    // Encode chỉ những ký tự PHÁ VỠ URI.create, giữ nguyên cú pháp URL hợp lệ.
+    // Không double-encode %xx đã có sẵn. % đơn lẻ (không theo sau bởi 2 hex) bị encode thành %25.
+    static String encodeUrlLoose(String url) {
+        if (url == null) return "";
+        StringBuilder sb = new StringBuilder(url.length() + 32);
+        for (int i = 0; i < url.length(); ) {
+            int cp = url.codePointAt(i);
+            int len = Character.charCount(cp);
+            if (cp < 0x20 || cp > 0x7E) {
+                try {
+                    byte[] bytes = new String(Character.toChars(cp)).getBytes("UTF-8");
+                    for (byte b : bytes) {
+                        sb.append('%');
+                        sb.append(Character.toUpperCase(Character.forDigit((b >> 4) & 0xF, 16)));
+                        sb.append(Character.toUpperCase(Character.forDigit(b & 0xF, 16)));
+                    }
+                } catch (Exception e) {
+                    sb.appendCodePoint(cp);
+                }
+            } else {
+                char c = (char) cp;
+                switch (c) {
+                    case ' ':  sb.append("%20"); break;
+                    case '"':  sb.append("%22"); break;
+                    case '<':  sb.append("%3C"); break;
+                    case '>':  sb.append("%3E"); break;
+                    case '\\': sb.append("%5C"); break;
+                    case '^':  sb.append("%5E"); break;
+                    case '`':  sb.append("%60"); break;
+                    case '{':  sb.append("%7B"); break;
+                    case '|':  sb.append("%7C"); break;
+                    case '}':  sb.append("%7D"); break;
+                    case '%': {
+                        boolean valid = i + 2 < url.length()
+                            && Character.digit(url.charAt(i + 1), 16) >= 0
+                            && Character.digit(url.charAt(i + 2), 16) >= 0;
+                        sb.append(valid ? "%" : "%25");
+                        break;
+                    }
+                    default: sb.append(c);
+                }
+            }
+            i += len;
+        }
+        return sb.toString();
+    }
+
     static String preferMobileUrl(String url) {
         try {
             URI u = new URI(url);
@@ -944,7 +1048,7 @@ public class MiniProxy {
         BufferedImage indexed = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_INDEXED, cm);
         Graphics2D g2 = indexed.createGraphics();
         g2.setColor(Color.WHITE);
-        g2.fillRect(0, 0, w, h);                 // ảnh trong suốt không bị thành đen
+        g2.fillRect(0, 0, w, h);
         g2.drawImage(src, 0, 0, null);
         g2.dispose();
         return indexed;
