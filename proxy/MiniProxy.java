@@ -164,9 +164,28 @@ public class MiniProxy {
         String finalUrl = fetchResult[1];
         System.out.println("  → final: " + finalUrl);
 
-        // 2. HTML → XHTML
+        // 2. HTML → XHTML + inject CSS ép giãn theo width
         org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, finalUrl);
         jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas").remove();
+
+        // Inject mobile force-layout CSS (giúp width:100% / max-width hoạt động)
+        org.jsoup.nodes.Element head = jsoupDoc.head();
+        if (head == null) {
+            head = jsoupDoc.prependElement("head");
+        }
+        org.jsoup.nodes.Element style = head.appendElement("style");
+        style.attr("type", "text/css");
+        style.text(
+            "html,body{width:100%!important;max-width:100%!important;margin:0!important;padding:0!important;overflow-x:hidden;}" +
+            "body{font-size:14px;line-height:1.4;}" +
+            "img,video,iframe,table,div,p,span,a,section,article,header,footer,main,aside,ul,ol,li,h1,h2,h3,h4,h5,h6{" +
+            "max-width:100%!important;box-sizing:border-box;}" +
+            "img{height:auto!important;display:block;}" +
+            "table{width:100%!important;table-layout:fixed;border-collapse:collapse;}" +
+            "td,th{word-wrap:break-word;}" +
+            "*{box-sizing:border-box;}"
+        );
+
         jsoupDoc.outputSettings()
                 .syntax(org.jsoup.nodes.Document.OutputSettings.Syntax.xml)
                 .charset("UTF-8")
