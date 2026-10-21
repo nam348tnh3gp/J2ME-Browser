@@ -527,7 +527,12 @@ class BrowserCanvas extends Canvas {
         return h < URLBAR_H ? URLBAR_H : h;
     }
 
-    int contentViewH() { return getHeight() - urlBarHeight(); }
+    int softBarHeight() {
+        int h = font.getHeight() + 6;
+        return h < 18 ? 18 : h;
+    }
+
+    int contentViewH() { return getHeight() - urlBarHeight() - softBarHeight(); }
 
     // ── Xoay màn hình → reload theo width mới ──
     protected void sizeChanged(int w, int h) {
@@ -547,8 +552,11 @@ class BrowserCanvas extends Canvas {
 
         g.setColor(0xFFFFFF); g.fillRect(0, 0, getWidth(), getHeight());
 
+        int sbH = softBarHeight();
+        int contentBottom = getHeight() - sbH;
+
         if ("home://".equals(t.url)) {
-            drawSpeedDial(g, ubH, getHeight());
+            drawSpeedDial(g, ubH, contentBottom);
         } else if (t.image != null) {
             g.drawImage(t.image, 0, ubH - t.scrollY, Graphics.TOP | Graphics.LEFT);
             drawLinkHighlight(g, t, ubH);
@@ -567,6 +575,22 @@ class BrowserCanvas extends Canvas {
         }
 
         drawUrlBar(g, ubH, t);
+        drawSoftBar(g);
+    }
+
+    void drawSoftBar(Graphics g) {
+        int h = softBarHeight();
+        int y = getHeight() - h;
+        g.setColor(0xDDDDDD);
+        g.fillRect(0, y, getWidth(), h);
+        g.setColor(0xAAAAAA);
+        g.drawLine(0, y, getWidth(), y);
+        g.setColor(0x000000);
+        g.setFont(font);
+        g.drawString("Menu", 4, y + 3, Graphics.TOP | Graphics.LEFT);
+        String right = "Lùi";
+        int rw = font.stringWidth(right);
+        g.drawString(right, getWidth() - rw - 4, y + 3, Graphics.TOP | Graphics.LEFT);
     }
 
     void drawUrlBar(Graphics g, int h, MiniBrowser.Tab t) {
@@ -589,14 +613,14 @@ class BrowserCanvas extends Canvas {
         MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
         int y1 = top + (lr.y1 - t.scrollY) - 1;
         int y2 = top + (lr.y2 - t.scrollY) + 1;
-        if (y2 < top || y1 > getHeight()) return;
+        if (y2 < top || y1 > getHeight() - softBarHeight()) return;
         g.setColor(0xFF8800);
         g.drawRect(lr.x1 - 1, y1, (lr.x2 - lr.x1) + 2, y2 - y1);
         g.drawRect(lr.x1 - 2, y1 - 1, (lr.x2 - lr.x1) + 4, (y2 - y1) + 2);
     }
 
     void drawScrollbar(Graphics g, MiniBrowser.Tab t, int top) {
-        int viewH = getHeight() - top;
+        int viewH = contentViewH();
         int imgH = t.image.getHeight();
         if (imgH <= viewH || viewH < 10) return;
         int sbW = 3;
@@ -843,6 +867,16 @@ class BrowserCanvas extends Canvas {
     // # : reload
     // Soft keys: Menu / Back (đã gắn Command)
     protected void keyPressed(int keyCode) {
+        // Soft keys (Nokia-style and common mappings)
+        if (keyCode == -6 || keyCode == 21) { // Left soft
+            midlet.showMenu();
+            return;
+        }
+        if (keyCode == -7 || keyCode == 22) { // Right soft
+            midlet.goBack();
+            return;
+        }
+
         int action = 0;
         try { action = getGameAction(keyCode); } catch (Exception e) {}
 
