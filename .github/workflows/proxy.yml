@@ -2,13 +2,6 @@ name: Run Proxy
 
 on:
   workflow_dispatch:
-    inputs:
-      duckdns_domain:
-        description: 'DuckDNS subdomain (e.g. myproxy)'
-        required: true
-      duckdns_token:
-        description: 'DuckDNS token'
-        required: true
 
 jobs:
   proxy:
@@ -27,16 +20,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
-
-      - name: Update DuckDNS
-        run: |
-          IP=$(curl -s https://api.ipify.org)
-          echo "Public IP: $IP"
-          DOMAIN="${{ github.event.inputs.duckdns_domain }}"
-          TOKEN="${{ github.event.inputs.duckdns_token }}"
-          RESULT=$(curl -s "https://www.duckdns.org/update?domains=${DOMAIN}&token=${TOKEN}&ip=${IP}")
-          echo "DuckDNS: $RESULT"
-          echo "Proxy at ${DOMAIN}.duckdns.org:9999"
 
       - name: Compile proxy
         working-directory: proxy
