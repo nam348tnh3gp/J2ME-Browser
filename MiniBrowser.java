@@ -130,6 +130,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     void goHome() {
         Tab t = activeTab();
         t.url = "home://"; t.image = null; t.links = null; t.scrollY = 0;
+        canvas.selectedLink = -1;
         canvas.repaint();
     }
 
@@ -137,6 +138,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         if (tabs.size() >= MAX_TABS) { canvas.setStatus("Tối đa " + MAX_TABS + " tab"); return; }
         tabs.addElement(new Tab());
         activeTab = tabs.size() - 1;
+        canvas.selectedLink = -1;
         canvas.repaint();
     }
 
@@ -158,10 +160,11 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                         tabs.removeElementAt(activeTab);
                         if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
                     }
+                    canvas.selectedLink = -1;
                     display.setCurrent(canvas); canvas.repaint();
                 } else {
                     int idx = l.getSelectedIndex();
-                    if (idx >= 0 && idx < tabs.size()) { activeTab = idx; canvas.repaint(); }
+                    if (idx >= 0 && idx < tabs.size()) { activeTab = idx; canvas.selectedLink = -1; canvas.repaint(); }
                     display.setCurrent(canvas);
                 }
             }
@@ -173,6 +176,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         Tab t = activeTab();
         cache.clear();
         t.image = null; t.links = null; t.scrollY = 0;
+        canvas.selectedLink = -1;
         if (!"home://".equals(t.url)) loadAsync(t.url);
     }
 
@@ -182,6 +186,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         else if (tabs.size() > 1) {
             tabs.removeElementAt(activeTab);
             if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
+            canvas.selectedLink = -1;
             canvas.repaint();
         }
     }
@@ -209,6 +214,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                     String[] bm = (String[]) bookmarks.elementAt(idx);
                     Tab t = activeTab();
                     t.url = bm[1]; t.image = null; t.links = null; t.scrollY = 0;
+                    canvas.selectedLink = -1;
                     loadAsync(bm[1]);
                 }
                 display.setCurrent(canvas);
@@ -343,6 +349,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                     if (u.indexOf("://") < 0) u = "http://" + u;
                     Tab t = activeTab();
                     t.url = u; t.image = null; t.links = null; t.scrollY = 0;
+                    canvas.selectedLink = -1;
                     loadAsync(u);
                 }
                 display.setCurrent(canvas);
@@ -371,6 +378,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             Object[] arr = (Object[]) c;
             Tab t = activeTab();
             t.image = (Image) arr[0]; t.links = (Vector) arr[1]; t.scrollY = 0; t.url = url;
+            canvas.selectedLink = -1;
             canvas.stopLoading(); canvas.repaint();
             canvas.setStatus(url + " [cache]");
             return;
@@ -423,6 +431,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             Tab t = activeTab();
             t.url = url; t.image = img; t.links = links; t.scrollY = 0;
             t.lastBytes = imgData.length;
+            canvas.selectedLink = -1;   // FIX: không giữ highlight link của trang cũ
 
             canvas.stopLoading(); canvas.repaint();
             canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB)");
@@ -458,6 +467,8 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
 // ═══════════════════════════════════════════════════════════════
 //  BrowserCanvas — KHÔNG scale (ảnh khớp 1:1 màn hình)
+//  Cảm ứng kiểu Chrome Android: tap / drag (touch slop) / fling /
+//  long-press / double-tap
 // ═══════════════════════════════════════════════════════════════
 
 class BrowserCanvas extends Canvas {
@@ -466,15 +477,20 @@ class BrowserCanvas extends Canvas {
     String status = "";
     int selectedLink = -1;
 
+    // ── trạng thái cảm ứng ──
     private int pressX, pressY;
     private long pressTime;
     private int lastDragY;
     private long lastDragTime;
     private float velocity;
-    private boolean isDragging;
+    private boolean isDragging;          // true khi đã vượt ngưỡng touch slop
+    private boolean longPressed;
     private long lastTapTime;
     private int lastTapX, lastTapY;
+    private int touchSlop = 8;           // tính lại theo kích thước màn hình
     private volatile boolean momentumCancelled = false;
+    private Timer timer;
+    private TimerTask lpTask;
 
     private volatile boolean loading = false;
     private volatile int loadingFrame = 0;
@@ -516,6 +532,7 @@ class BrowserCanvas extends Canvas {
     // ── Xoay màn hình → reload theo width mới ──
     protected void sizeChanged(int w, int h) {
         MiniBrowser.Tab t = midlet.activeTab();
+        selectedLink = -1;
         if (t.image != null && t.image.getWidth() != w) {
             midlet.cache.clear();
             t.image = null; t.links = null; t.scrollY = 0;
@@ -646,16 +663,51 @@ class BrowserCanvas extends Canvas {
         repaint();
     }
 
-    // ── Touch ──
+    // ═══════════════════════════════════════════════════════════
+    //  TOUCH — kiểu Chrome Android
+    // ═══════════════════════════════════════════════════════════
+
+    /** Tìm link tại toạ độ màn hình (x, y). Vùng bấm nới theo độ rộng màn hình,
+     *  nếu nhiều link chồng nhau thì chọn link có tâm gần điểm chạm nhất. */
+    int linkAt(int x, int y) {
+        MiniBrowser.Tab t = midlet.activeTab();
+        if (t.image == null || t.links == null) return -1;
+        int pad = Math.max(4, getWidth() / 40);
+        int ix = x, iy = y - urlBarHeight() + t.scrollY;
+        int best = -1; long bestD = Long.MAX_VALUE;
+        for (int i = 0; i < t.links.size(); i++) {
+            MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
+            if (ix >= lr.x1 - pad && ix <= lr.x2 + pad
+                && iy >= lr.y1 - pad && iy <= lr.y2 + pad) {
+                long dx = ix - (lr.x1 + lr.x2) / 2, dy = iy - (lr.y1 + lr.y2) / 2;
+                long d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+        }
+        return best;
+    }
+
     protected void pointerPressed(int x, int y) {
-        momentumCancelled = true;
+        momentumCancelled = true;                       // chạm vào để dừng fling
+        touchSlop = Math.max(6, Math.min(getWidth(), getHeight()) / 30);
         pressX = x; pressY = y; pressTime = System.currentTimeMillis();
         lastDragY = y; lastDragTime = pressTime;
-        velocity = 0; isDragging = false;
+        velocity = 0; isDragging = false; longPressed = false;
+        selectedLink = (y >= urlBarHeight()) ? linkAt(x, y) : -1;   // phản hồi ngay khi chạm
+        repaint();
+        startLongPress(x, y);
     }
 
     protected void pointerDragged(int x, int y) {
-        if (System.currentTimeMillis() - pressTime < 40) return;
+        if (!isDragging) {
+            // Ngón tay luôn rung nhẹ khi chạm → chỉ coi là vuốt khi vượt ngưỡng slop
+            if (Math.abs(x - pressX) <= touchSlop && Math.abs(y - pressY) <= touchSlop) return;
+            isDragging = true;
+            cancelLongPress();
+            selectedLink = -1;
+            lastDragY = pressY;                         // nội dung bám theo ngón tay
+            lastDragTime = System.currentTimeMillis();
+        }
         int dy = lastDragY - y;
         if (dy == 0) return;
         long now = System.currentTimeMillis();
@@ -665,26 +717,43 @@ class BrowserCanvas extends Canvas {
             velocity = velocity * 0.6f + instV * 0.4f;
         }
         scroll(dy);
-        isDragging = true;
         lastDragY = y; lastDragTime = now;
     }
 
     protected void pointerReleased(int x, int y) {
-        long dur = System.currentTimeMillis() - pressTime;
-        int dx = Math.abs(x - pressX), dy = Math.abs(y - pressY);
+        cancelLongPress();
+        if (longPressed) { selectedLink = -1; repaint(); return; }   // long-press đã xử lý
 
-        if (isDragging) {
+        if (isDragging) {                                            // vuốt → fling
             if (Math.abs(velocity) > 1.5f) applyMomentum(velocity);
             return;
         }
-        if (dur > 500 && dx < 15 && dy < 15) { longPress(x, y); return; }
 
+        // ===== TAP =====
+        boolean onLink = (y >= urlBarHeight()) && linkAt(x, y) >= 0;
         long now = System.currentTimeMillis();
-        if (now - lastTapTime < 400 && Math.abs(x - lastTapX) < 40 && Math.abs(y - lastTapY) < 40) {
+        // Double-tap chỉ áp dụng ở vùng trống (tap vào link phải mở link ngay)
+        if (!onLink && now - lastTapTime < 300
+            && Math.abs(x - lastTapX) < touchSlop * 3 && Math.abs(y - lastTapY) < touchSlop * 3) {
             handleDoubleTap(x, y); lastTapTime = 0; return;
         }
         lastTapTime = now; lastTapX = x; lastTapY = y;
         handleTap(x, y);
+    }
+
+    void startLongPress(final int x, final int y) {
+        cancelLongPress();
+        if (timer == null) timer = new Timer();
+        lpTask = new TimerTask() {
+            public void run() {
+                if (!isDragging) { longPressed = true; longPress(x, y); }
+            }
+        };
+        timer.schedule(lpTask, 500);
+    }
+
+    void cancelLongPress() {
+        if (lpTask != null) { lpTask.cancel(); lpTask = null; }
     }
 
     void applyMomentum(final float v0) {
@@ -704,6 +773,7 @@ class BrowserCanvas extends Canvas {
     void handleTap(int x, int y) {
         int ubH = urlBarHeight();
         MiniBrowser.Tab t = midlet.activeTab();
+        selectedLink = -1;
 
         if (y < ubH) {
             int btnW = 14;
@@ -718,10 +788,9 @@ class BrowserCanvas extends Canvas {
         }
 
         if ("home://".equals(t.url)) {
-            int top = ubH;
-            int w = getWidth(), h = getHeight() - top;
-            int cellW = w / 3, cellH = h / 3;
-            int col = x / cellW, row = (y - top) / cellH;
+            int w = getWidth(), h = getHeight() - ubH;
+            int col = Math.min(2, x * 3 / w);                 // clamp: tránh lệch ô khi w không chia hết cho 3
+            int row = Math.min(2, (y - ubH) * 3 / h);
             int idx = row * 3 + col;
             if (idx >= 0 && idx < midlet.speedDial.size()) {
                 String[] entry = (String[]) midlet.speedDial.elementAt(idx);
@@ -731,23 +800,13 @@ class BrowserCanvas extends Canvas {
             return;
         }
 
-        if (t.image == null || t.links == null) return;
-
-        int imgX = x;
-        int imgY = y - ubH + t.scrollY;
-
-        for (int i = 0; i < t.links.size(); i++) {
+        int i = linkAt(x, y);
+        if (i >= 0) {
             MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
-            // Padding ±3px
-            if (imgX >= lr.x1 - 3 && imgX <= lr.x2 + 3
-                && imgY >= lr.y1 - 3 && imgY <= lr.y2 + 3) {
-                selectedLink = i;
-                repaint();
-                t.url = lr.url; t.image = null; t.links = null; t.scrollY = 0;
-                midlet.loadAsync(lr.url);
-                return;
-            }
+            t.url = lr.url; t.image = null; t.links = null; t.scrollY = 0;
+            midlet.loadAsync(lr.url);
         }
+        repaint();
     }
 
     void handleDoubleTap(int x, int y) {
@@ -761,20 +820,16 @@ class BrowserCanvas extends Canvas {
         repaint();
     }
 
+    // Nhấn giữ link → hiện URL (Alert tự tắt sau 3s)
     void longPress(int x, int y) {
-        int ubH = urlBarHeight();
+        if (y < urlBarHeight()) return;
         MiniBrowser.Tab t = midlet.activeTab();
-        if (t.image == null || t.links == null) return;
-        int imgX = x;
-        int imgY = y - ubH + t.scrollY;
-        for (int i = 0; i < t.links.size(); i++) {
-            MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
-            if (imgX >= lr.x1 - 3 && imgX <= lr.x2 + 3
-                && imgY >= lr.y1 - 3 && imgY <= lr.y2 + 3) {
-                setStatus(lr.url);
-                return;
-            }
-        }
+        int i = linkAt(x, y);
+        if (i < 0) return;
+        MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
+        Alert a = new Alert("Link", lr.url, null, AlertType.INFO);
+        a.setTimeout(3000);
+        midlet.display.setCurrent(a, this);
     }
 
     // ── Phím (fallback emulator) ──
