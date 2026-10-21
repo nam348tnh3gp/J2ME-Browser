@@ -12,7 +12,10 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     static final String RMS_CFG = "MiniBrowserCfg";
     static final String RMS_BM  = "MiniBrowserBm";
     static final int MAX_TABS = 3;
-    static final int CACHE_MAX = 6;
+    static final int CACHE_MAX = 4;          // ảnh decode rất tốn RAM → giữ ít
+    static final int HISTORY_MAX = 20;
+    static final String HOME = "home://";
+    static final String SEARCH_URL = "https://html.duckduckgo.com/html/?q=";
 
     static String proxyHost = DEFAULT_HOST;
     static int proxyPort = DEFAULT_PORT;
@@ -26,7 +29,8 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     Command menuCmd, backCmd;
 
     Hashtable cache = new Hashtable();
-    volatile boolean stopRequested = false;
+    Vector cacheOrder = new Vector();
+    volatile int loadGen = 0;                       // mỗi lần tải/huỷ tăng 1 → luồng cũ tự nhận ra mình đã hết hạn
     volatile SocketConnection currentConnection = null;
 
     Vector bookmarks = new Vector();
@@ -40,12 +44,24 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     };
 
     static class Tab {
-        String url = "home://";
+        String url = HOME;
         Image image;
         Vector links;
-        int scrollY = 0;      // pixel ảnh (== pixel màn hình vì ảnh khớp width)
+        int scrollY = 0;         // pixel ảnh (== pixel màn hình vì ảnh khớp width)
+        int pendingScroll = 0;   // vị trí cuộn cần khôi phục khi trang tải xong (Lùi / Reload)
         int lastBytes = 0;
+        Vector history = new Vector();   // mỗi phần tử: Object[]{ String url, Integer scrollY }
         Tab() {}
+
+        void push() {
+            if (url == null) return;
+            if (history.size() > 0) {
+                Object[] top = (Object[]) history.elementAt(history.size() - 1);
+                if (url.equals(top[0])) { top[1] = new Integer(scrollY); return; }
+            }
+            if (history.size() >= HISTORY_MAX) history.removeElementAt(0);
+            history.addElement(new Object[]{ url, new Integer(scrollY) });
+        }
     }
 
     static class LinkRect {
@@ -54,6 +70,10 @@ public class MiniBrowser extends MIDlet implements CommandListener {
     }
 
     public void startApp() {
+        if (canvas != null) {            // quay lại từ pauseApp: giữ nguyên trạng thái, không dựng lại
+            display.setCurrent(canvas);
+            return;
+        }
         display = Display.getDisplay(this);
         firstRun = !loadSettings();
         loadBookmarks();
@@ -73,13 +93,16 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         display.setCurrent(canvas);
 
         if (firstRun) {
-            canvas.setStatus("Chưa cấu hình proxy — Menu > Cấu hình");
+            canvas.setStatus("Chưa cấu hình proxy — Menu > Settings");
             promptSettings();
         }
     }
 
     public void pauseApp() {}
-    public void destroyApp(boolean u) { abortCurrent(); }
+    public void destroyApp(boolean u) {
+        abortCurrent();
+        if (canvas != null) canvas.dispose();
+    }
 
     public void commandAction(Command c, Displayable d) {
         if (c == menuCmd) showMenu();
@@ -88,9 +111,10 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     Tab activeTab() { return (Tab) tabs.elementAt(activeTab); }
 
+    // ── Menu ──
     void showMenu() {
         List menu = new List("Menu", List.IMPLICIT);
-        menu.append("URL...", null);
+        menu.append("URL / Tìm kiếm...", null);
         menu.append("Home", null);
         menu.append("New tab", null);
         menu.append("Tabs (" + tabs.size() + ")", null);
@@ -100,6 +124,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         menu.append("Save bookmark", null);
         menu.append("Clear cache", null);
         menu.append("Settings", null);
+        menu.append("Phím tắt", null);
         menu.append("Exit", null);
         menu.addCommand(new Command("Đóng", Command.CANCEL, 1));
 
@@ -115,21 +140,88 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                     case 2: newTab(); break;
                     case 3: showTabs(); break;
                     case 4: reload(); break;
-                    case 5: abortCurrent(); canvas.setStatus("Đã dừng"); break;
+                    case 5: stopLoad(); break;
                     case 6: showBookmarks(); break;
                     case 7: saveBookmark(); break;
-                    case 8: cache.clear(); canvas.setStatus("Đã xoá cache"); break;
+                    case 8: cacheClear(); canvas.setStatus("Đã xoá cache"); break;
                     case 9: promptSettings(); break;
-                    case 10: notifyDestroyed(); break;
+                    case 10: showHelp(); break;
+                    case 11: notifyDestroyed(); break;
                 }
             }
         });
         display.setCurrent(menu);
     }
 
+    void showHelp() {
+        Form f = new Form("Phím tắt");
+        f.append("Lên/Xuống (2/8): chọn link trước/sau\n"
+               + "Trái/Phải (4/6): cuộn 1 trang\n"
+               + "OK / 5 / 0: mở link đang chọn\n"
+               + "*: đầu trang    #: cuối trang\n"
+               + "1: nhập URL/tìm kiếm    3: trang chủ\n"
+               + "7: tải lại/dừng    9: bookmark\n"
+               + "Phím mềm trái: Menu\n"
+               + "Phím mềm phải / Clear: Lùi\n"
+               + "Cảm ứng: chạm mở link, kéo để cuộn,\n"
+               + "giữ để xem URL, chạm đúp lên đầu trang");
+        f.addCommand(new Command("Đóng", Command.BACK, 1));
+        f.setCommandListener(new CommandListener() {
+            public void commandAction(Command c, Displayable d) { display.setCurrent(canvas); }
+        });
+        display.setCurrent(f);
+    }
+
+    // ── Điều hướng / lịch sử ──
+    // Mọi lần mở URL mới đều đi qua đây để có lịch sử cho nút Lùi.
+    void navigate(String url) {
+        Tab t = activeTab();
+        t.push();
+        t.url = url; t.image = null; t.links = null; t.scrollY = 0; t.pendingScroll = 0;
+        canvas.selectedLink = -1;
+        loadAsync(url);
+    }
+
     void goHome() {
         Tab t = activeTab();
-        t.url = "home://"; t.image = null; t.links = null; t.scrollY = 0;
+        abortCurrent();
+        canvas.stopLoading();
+        if (!HOME.equals(t.url)) t.push();
+        t.url = HOME; t.image = null; t.links = null; t.scrollY = 0; t.pendingScroll = 0;
+        canvas.selectedLink = -1;
+        canvas.repaint();
+    }
+
+    void goBack() {
+        Tab t = activeTab();
+        if (t.history.size() > 0) {
+            int last = t.history.size() - 1;
+            Object[] e = (Object[]) t.history.elementAt(last);
+            t.history.removeElementAt(last);
+            showEntry(t, (String) e[0], ((Integer) e[1]).intValue());
+            return;
+        }
+        if (!HOME.equals(t.url)) { showEntry(t, HOME, 0); return; }
+        if (tabs.size() > 1) closeActiveTab();
+    }
+
+    void showEntry(Tab t, String u, int scrollY) {
+        abortCurrent();
+        canvas.stopLoading();
+        t.image = null; t.links = null; t.scrollY = 0;
+        canvas.selectedLink = -1;
+        t.url = u;
+        if (HOME.equals(u)) { t.pendingScroll = 0; canvas.repaint(); return; }
+        t.pendingScroll = scrollY;
+        loadAsync(u);
+    }
+
+    void closeActiveTab() {
+        if (tabs.size() <= 1) return;
+        abortCurrent();
+        canvas.stopLoading();
+        tabs.removeElementAt(activeTab);
+        if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
         canvas.selectedLink = -1;
         canvas.repaint();
     }
@@ -146,7 +238,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         List list = new List("Tabs (" + tabs.size() + "/" + MAX_TABS + ")", List.IMPLICIT);
         for (int i = 0; i < tabs.size(); i++) {
             Tab t = (Tab) tabs.elementAt(i);
-            String u = "home://".equals(t.url) ? "Home (Speed Dial)" : t.url;
+            String u = HOME.equals(t.url) ? "Home (Speed Dial)" : t.url;
             list.append((i == activeTab ? "● " : "  ") + (i + 1) + ": " + shorten(u, 30), null);
         }
         list.addCommand(new Command("Đóng tab này", Command.SCREEN, 1));
@@ -156,12 +248,8 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             public void commandAction(Command c, Displayable d) {
                 if (c.getCommandType() == Command.CANCEL) display.setCurrent(canvas);
                 else if (c.getLabel().equals("Đóng tab này")) {
-                    if (tabs.size() > 1) {
-                        tabs.removeElementAt(activeTab);
-                        if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
-                    }
-                    canvas.selectedLink = -1;
-                    display.setCurrent(canvas); canvas.repaint();
+                    closeActiveTab();
+                    display.setCurrent(canvas);
                 } else {
                     int idx = l.getSelectedIndex();
                     if (idx >= 0 && idx < tabs.size()) { activeTab = idx; canvas.selectedLink = -1; canvas.repaint(); }
@@ -174,23 +262,15 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     void reload() {
         Tab t = activeTab();
-        cache.clear();
+        if (HOME.equals(t.url)) return;
+        cacheRemove(t.url + "@" + canvas.getWidth());
+        t.pendingScroll = t.scrollY;
         t.image = null; t.links = null; t.scrollY = 0;
         canvas.selectedLink = -1;
-        if (!"home://".equals(t.url)) loadAsync(t.url);
+        loadAsync(t.url);
     }
 
-    void goBack() {
-        Tab t = activeTab();
-        if (t.image != null || (t.links != null && t.links.size() > 0)) goHome();
-        else if (tabs.size() > 1) {
-            tabs.removeElementAt(activeTab);
-            if (activeTab >= tabs.size()) activeTab = tabs.size() - 1;
-            canvas.selectedLink = -1;
-            canvas.repaint();
-        }
-    }
-
+    // ── Bookmarks ──
     void showBookmarks() {
         if (bookmarks.size() == 0) { canvas.setStatus("Chưa có bookmark"); return; }
         List list = new List("Bookmarks", List.IMPLICIT);
@@ -210,14 +290,11 @@ public class MiniBrowser extends MIDlet implements CommandListener {
                     display.setCurrent(canvas); return;
                 }
                 int idx = l.getSelectedIndex();
+                display.setCurrent(canvas);
                 if (idx >= 0) {
                     String[] bm = (String[]) bookmarks.elementAt(idx);
-                    Tab t = activeTab();
-                    t.url = bm[1]; t.image = null; t.links = null; t.scrollY = 0;
-                    canvas.selectedLink = -1;
-                    loadAsync(bm[1]);
+                    navigate(bm[1]);
                 }
-                display.setCurrent(canvas);
             }
         });
         display.setCurrent(list);
@@ -225,7 +302,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
 
     void saveBookmark() {
         Tab t = activeTab();
-        if ("home://".equals(t.url) || t.url == null) { canvas.setStatus("Không có trang"); return; }
+        if (HOME.equals(t.url) || t.url == null) { canvas.setStatus("Không có trang"); return; }
         for (int i = 0; i < bookmarks.size(); i++) {
             String[] bm = (String[]) bookmarks.elementAt(i);
             if (bm[1].equals(t.url)) { canvas.setStatus("Đã có bookmark"); return; }
@@ -235,6 +312,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         canvas.setStatus("Đã lưu bookmark");
     }
 
+    // ── Lưu trữ RMS ──
     boolean loadSettings() {
         RecordStore rs = null; boolean exists = false;
         try {
@@ -331,75 +409,83 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         }
         if (h.length() == 0 || p < 1 || p > 65535) { canvas.setStatus("Host/port sai"); display.setCurrent(canvas); return; }
         proxyHost = h; proxyPort = p; saveSettings();
+        cacheClear();
         canvas.setStatus("Đã lưu: " + proxyHost + ":" + proxyPort);
         display.setCurrent(canvas);
     }
 
+    // Nhập URL hoặc từ khoá tìm kiếm (giống thanh địa chỉ Opera Mini)
     void promptUrl() {
         Tab t = activeTab();
-        String cur = "home://".equals(t.url) ? "" : t.url;
-        final TextBox tb = new TextBox("URL:", cur, 200, TextField.URL);
+        String cur = HOME.equals(t.url) ? "" : t.url;
+        final TextBox tb = new TextBox("URL hoặc từ khoá:", cur, 300, TextField.ANY);
         tb.addCommand(new Command("OK", Command.OK, 1));
         tb.addCommand(new Command("Hủy", Command.CANCEL, 2));
         tb.setCommandListener(new CommandListener() {
             public void commandAction(Command c, Displayable d) {
+                display.setCurrent(canvas);
                 if (c.getCommandType() == Command.OK) {
                     String u = tb.getString().trim();
-                    if (u.length() == 0) { display.setCurrent(canvas); return; }
-                    if (u.indexOf("://") < 0) u = "http://" + u;
-                    Tab t = activeTab();
-                    t.url = u; t.image = null; t.links = null; t.scrollY = 0;
-                    canvas.selectedLink = -1;
-                    loadAsync(u);
+                    if (u.length() == 0) return;
+                    navigate(resolveInput(u));
                 }
-                display.setCurrent(canvas);
             }
         });
         display.setCurrent(tb);
     }
 
+    static String resolveInput(String u) {
+        if (u.indexOf("://") >= 0) return u;
+        boolean hostLike = u.indexOf(' ') < 0
+            && (u.indexOf('.') > 0 || u.indexOf(':') > 0 || u.startsWith("localhost"));
+        if (hostLike) return "http://" + u;
+        return SEARCH_URL + urlEncode(u);
+    }
+
+    // ── Tải trang ──
     synchronized void abortCurrent() {
-        stopRequested = true;
+        loadGen++;
         SocketConnection old = currentConnection;
         currentConnection = null;
         if (old != null) try { old.close(); } catch (Exception e) {}
     }
 
-    void loadAsync(final String url) {
+    void stopLoad() {
         abortCurrent();
-        new Thread(new Runnable() { public void run() { loadUrl(url); } }).start();
+        canvas.stopLoading();
+        canvas.setStatus("Đã dừng");
     }
 
-    void loadUrl(String url) {
+    void loadAsync(final String url) {
+        final Tab target = activeTab();      // trang tải xong sẽ vào đúng tab đã yêu cầu
+        final int gen;
+        synchronized (this) { abortCurrent(); gen = loadGen; }
+        canvas.startLoading();
+        new Thread(new Runnable() {
+            public void run() { loadUrl(url, gen, target); }
+        }).start();
+    }
+
+    void loadUrl(String url, int gen, Tab t) {
         int screenW = canvas.getWidth();
         String cacheKey = url + "@" + screenW;
-        Object c = cache.get(cacheKey);
-        if (c != null) {
-            Object[] arr = (Object[]) c;
-            Tab t = activeTab();
-            t.image = (Image) arr[0]; t.links = (Vector) arr[1]; t.scrollY = 0; t.url = url;
-            canvas.selectedLink = -1;
-            canvas.stopLoading(); canvas.repaint();
-            canvas.setStatus(url + " [cache]");
+        Object[] hit = cacheGet(cacheKey);
+        if (hit != null) {
+            if (gen == loadGen) applyPage(t, url, (Image) hit[0], (Vector) hit[1], url + " [cache]");
             return;
         }
 
-        stopRequested = false;
-        canvas.startLoading();
         SocketConnection sc = null;
         try {
             sc = (SocketConnection) Connector.open("socket://" + proxyHost + ":" + proxyPort);
-            try {
-                // Timeout dài hơn để proxy kịp render trang phức tạp
-                sc.setSocketOption(SocketConnection.DELAY, 0);
-            } catch (Exception e) {}
+            try { sc.setSocketOption(SocketConnection.DELAY, 0); } catch (Exception e) {}
             synchronized (this) {
-                if (stopRequested) { sc.close(); canvas.stopLoading(); return; }
+                if (gen != loadGen) { sc.close(); sc = null; return; }
                 currentConnection = sc;
             }
 
             DataOutputStream out = new DataOutputStream(sc.openOutputStream());
-            out.writeInt(canvas.getWidth());
+            out.writeInt(screenW);
             out.writeInt(canvas.getHeight());
             byte[] ub = url.getBytes("UTF-8");
             out.writeInt(ub.length); out.write(ub); out.flush();
@@ -412,40 +498,44 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             in.readFully(imgData);
 
             int linkCount = in.readInt();
+            if (linkCount < 0 || linkCount > 2000) throw new IOException("Số link sai");
             Vector links = new Vector();
             for (int i = 0; i < linkCount; i++) {
                 int x1 = in.readInt(), y1 = in.readInt();
                 int x2 = in.readInt(), y2 = in.readInt();
                 int ul = in.readInt();
+                if (ul < 0 || ul > 8192) throw new IOException("URL link sai");
                 byte[] ubb = new byte[ul];
                 in.readFully(ubb);
                 links.addElement(new LinkRect(x1, y1, x2, y2, new String(ubb, "UTF-8")));
             }
+            sortLinks(links);
 
             synchronized (this) { if (currentConnection == sc) currentConnection = null; }
             try { sc.close(); } catch (Exception e) {}
             sc = null;
 
-            if (stopRequested) { canvas.stopLoading(); return; }
+            if (gen != loadGen) return;
 
             Image img = Image.createImage(imgData, 0, imgData.length);
-            if (cache.size() > CACHE_MAX) cache.clear();
-            cache.put(cacheKey, new Object[]{ img, links });
+            imgData = null;
+            cachePut(cacheKey, img, links);
+            if (gen != loadGen) return;
 
-            Tab t = activeTab();
-            t.url = url; t.image = img; t.links = links; t.scrollY = 0;
-            t.lastBytes = imgData.length;
-            // Auto-focus first link (feature phone standard — PicoBrowser / Opera Mini style)
-            canvas.selectedLink = (links != null && links.size() > 0) ? 0 : -1;
-            if (canvas.selectedLink >= 0) canvas.ensureVisible();
-
-            canvas.stopLoading(); canvas.repaint();
-            canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB, " + links.size() + " links)");
+            t.lastBytes = len;
+            applyPage(t, url, img, links, url + "  (" + (len / 1024) + " KB, " + links.size() + " link)");
         } catch (Exception e) {
-            canvas.stopLoading();
-            if (!stopRequested) {
-                canvas.setStatus("Lỗi: " + e.getMessage());
-                e.printStackTrace();
+            if (gen == loadGen) {
+                String m = e.getMessage();
+                if (m == null) m = e.toString();
+                canvas.stopLoading();
+                canvas.setStatus("Lỗi: " + m);
+            }
+        } catch (OutOfMemoryError oom) {
+            cacheClear();
+            if (gen == loadGen) {
+                canvas.stopLoading();
+                canvas.setStatus("Hết bộ nhớ — thử trang nhẹ hơn");
             }
         } finally {
             if (sc != null) try { sc.close(); } catch (Exception e) {}
@@ -453,6 +543,63 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         }
     }
 
+    void applyPage(Tab t, String url, Image img, Vector links, String note) {
+        canvas.stopLoading();
+        if (tabs.indexOf(t) < 0) return;                   // tab đã bị đóng
+        t.url = url; t.image = img; t.links = links;
+        int max = Math.max(0, img.getHeight() - canvas.contentViewH());
+        t.scrollY = Math.min(t.pendingScroll, max);
+        t.pendingScroll = 0;
+        if (t == activeTab()) {
+            canvas.autoFocus();
+            canvas.setStatus(note);
+        }
+        canvas.repaint();
+    }
+
+    // Sắp link theo vị trí (trên→dưới, trái→phải) để phím điều hướng đi đúng thứ tự nhìn thấy
+    static void sortLinks(Vector v) {
+        for (int i = 1; i < v.size(); i++) {
+            LinkRect k = (LinkRect) v.elementAt(i);
+            int j = i - 1;
+            while (j >= 0 && linkBefore(k, (LinkRect) v.elementAt(j))) {
+                v.setElementAt(v.elementAt(j), j + 1);
+                j--;
+            }
+            v.setElementAt(k, j + 1);
+        }
+    }
+
+    static boolean linkBefore(LinkRect a, LinkRect b) {
+        int ba = a.y1 / 8, bb = b.y1 / 8;
+        if (ba != bb) return ba < bb;
+        return a.x1 < b.x1;
+    }
+
+    // ── Cache LRU ──
+    synchronized Object[] cacheGet(String key) { return (Object[]) cache.get(key); }
+
+    synchronized void cachePut(String key, Image img, Vector links) {
+        if (cache.containsKey(key)) cacheOrder.removeElement(key);
+        cache.put(key, new Object[]{ img, links });
+        cacheOrder.addElement(key);
+        while (cacheOrder.size() > CACHE_MAX) {
+            cache.remove(cacheOrder.elementAt(0));
+            cacheOrder.removeElementAt(0);
+        }
+    }
+
+    synchronized void cacheRemove(String key) {
+        cache.remove(key);
+        cacheOrder.removeElement(key);
+    }
+
+    synchronized void cacheClear() {
+        cache.clear();
+        cacheOrder.removeAllElements();
+    }
+
+    // ── Tiện ích ──
     static String shorten(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max - 1) + "…";
@@ -469,19 +616,33 @@ public class MiniBrowser extends MIDlet implements CommandListener {
         v.copyInto(r);
         return r;
     }
+
+    static String urlEncode(String s) {
+        byte[] b;
+        try { b = s.getBytes("UTF-8"); } catch (Exception e) { b = s.getBytes(); }
+        String hex = "0123456789ABCDEF";
+        StringBuffer sb = new StringBuffer();
+        for (int i = 0; i < b.length; i++) {
+            int c = b[i] & 0xFF;
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.' || c == '~') sb.append((char) c);
+            else if (c == ' ') sb.append('+');
+            else { sb.append('%'); sb.append(hex.charAt(c >> 4)); sb.append(hex.charAt(c & 15)); }
+        }
+        return sb.toString();
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  BrowserCanvas — KHÔNG scale (ảnh khớp 1:1 màn hình)
-//  Cảm ứng kiểu Chrome Android: tap / drag (touch slop) / fling /
-//  long-press / double-tap
+//  Cảm ứng kiểu Chrome Android + phím điều hướng kiểu Opera Mini
 // ═══════════════════════════════════════════════════════════════
 
 class BrowserCanvas extends Canvas {
     MiniBrowser midlet;
     Font font;
     String status = "";
-    int selectedLink = -1;
+    int selectedLink = -1;   // trên trang: chỉ số link; ở Speed Dial: chỉ số ô
 
     // ── trạng thái cảm ứng ──
     private int pressX, pressY;
@@ -507,6 +668,9 @@ class BrowserCanvas extends Canvas {
     BrowserCanvas(MiniBrowser m) {
         midlet = m;
         font = Font.getFont(Font.FACE_SYSTEM, Font.STYLE_PLAIN, Font.SIZE_SMALL);
+        // Thanh phím mềm (Menu/Lùi) do app tự vẽ → phải toàn màn hình, nếu không máy sẽ vẽ thêm
+        // một thanh lệnh nữa (bị trùng) và phím mềm không tới được keyPressed.
+        setFullScreenMode(true);
     }
 
     void setStatus(String s) { status = s; repaint(); }
@@ -526,7 +690,14 @@ class BrowserCanvas extends Canvas {
         loadingThread.start();
     }
 
-    void stopLoading() { loading = false; loadingThread = null; }
+    void stopLoading() { loading = false; loadingThread = null; repaint(); }
+
+    void dispose() {
+        loading = false;
+        momentumCancelled = true;
+        cancelLongPress();
+        if (timer != null) { timer.cancel(); timer = null; }
+    }
 
     int urlBarHeight() {
         int h = font.getHeight() + 4;
@@ -540,15 +711,21 @@ class BrowserCanvas extends Canvas {
 
     int contentViewH() { return getHeight() - urlBarHeight() - softBarHeight(); }
 
-    // ── Xoay màn hình → reload theo width mới ──
+    // Phải khớp với proxy: renderW = clamp(200..480, screenW)
+    static int renderWidthFor(int w) { return Math.max(200, Math.min(480, w)); }
+
+    // ── Đổi kích thước / xoay màn hình → tải lại theo width mới ──
     protected void sizeChanged(int w, int h) {
+        if (midlet.tabs.size() == 0) return;
         MiniBrowser.Tab t = midlet.activeTab();
         selectedLink = -1;
-        if (t.image != null && t.image.getWidth() != w) {
-            midlet.cache.clear();
+        if (t.image != null && t.image.getWidth() != renderWidthFor(w)) {
+            midlet.cacheClear();
+            t.pendingScroll = 0;
             t.image = null; t.links = null; t.scrollY = 0;
-            if (!"home://".equals(t.url)) midlet.loadAsync(t.url);
+            if (!MiniBrowser.HOME.equals(t.url)) midlet.loadAsync(t.url);
         }
+        repaint();
     }
 
     // ── Paint ──
@@ -561,7 +738,7 @@ class BrowserCanvas extends Canvas {
         int sbH = softBarHeight();
         int contentBottom = getHeight() - sbH;
 
-        if ("home://".equals(t.url)) {
+        if (MiniBrowser.HOME.equals(t.url)) {
             drawSpeedDial(g, ubH, contentBottom);
         } else if (t.image != null) {
             g.drawImage(t.image, 0, ubH - t.scrollY, Graphics.TOP | Graphics.LEFT);
@@ -575,16 +752,18 @@ class BrowserCanvas extends Canvas {
                 Graphics.TOP | Graphics.LEFT);
         } else if (status.length() > 0) {
             g.setColor(0x666666); g.setFont(font);
-            int tw = font.stringWidth(status);
-            g.drawString(status, (getWidth() - tw) / 2, getHeight() / 2 - font.getHeight() / 2,
+            String s = truncate(status, getWidth() - 8);
+            int tw = font.stringWidth(s);
+            g.drawString(s, (getWidth() - tw) / 2, getHeight() / 2 - font.getHeight() / 2,
                 Graphics.TOP | Graphics.LEFT);
         }
 
         drawUrlBar(g, ubH, t);
-        drawSoftBar(g);
+        drawSoftBar(g, t);
     }
 
-    void drawSoftBar(Graphics g) {
+    // Thanh dưới: Menu | URL của link đang chọn | Lùi
+    void drawSoftBar(Graphics g, MiniBrowser.Tab t) {
         int h = softBarHeight();
         int y = getHeight() - h;
         g.setColor(0xDDDDDD);
@@ -593,10 +772,19 @@ class BrowserCanvas extends Canvas {
         g.drawLine(0, y, getWidth(), y);
         g.setColor(0x000000);
         g.setFont(font);
-        g.drawString("Menu", 4, y + 3, Graphics.TOP | Graphics.LEFT);
-        String right = "Lùi";
-        int rw = font.stringWidth(right);
+        String left = "Menu", right = "Lùi";
+        int lw = font.stringWidth(left), rw = font.stringWidth(right);
+        g.drawString(left, 4, y + 3, Graphics.TOP | Graphics.LEFT);
         g.drawString(right, getWidth() - rw - 4, y + 3, Graphics.TOP | Graphics.LEFT);
+        if (selectedLink >= 0 && t.links != null && selectedLink < t.links.size()
+            && !MiniBrowser.HOME.equals(t.url)) {
+            MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
+            int avail = getWidth() - lw - rw - 20;
+            if (avail > 20) {
+                g.setColor(0x0000AA);
+                g.drawString(truncate(lr.url, avail), lw + 10, y + 3, Graphics.TOP | Graphics.LEFT);
+            }
+        }
     }
 
     void drawUrlBar(Graphics g, int h, MiniBrowser.Tab t) {
@@ -607,7 +795,7 @@ class BrowserCanvas extends Canvas {
         g.setColor(0x000000); g.setFont(font);
         g.drawString("◄", 2, 2, Graphics.TOP | Graphics.LEFT);
         g.drawString(loading ? "×" : "↻", getWidth() - btnW, 2, Graphics.TOP | Graphics.LEFT);
-        String shown = "home://".equals(t.url) ? "Speed Dial" : t.url;
+        String shown = MiniBrowser.HOME.equals(t.url) ? "Speed Dial" : t.url;
         if (loading) shown = "Đang tải" + dots(loadingFrame);
         shown = truncate(shown, getWidth() - 2 * btnW - 6);
         g.setColor(loading ? 0x000088 : 0x333333);
@@ -618,24 +806,18 @@ class BrowserCanvas extends Canvas {
         if (selectedLink < 0 || t.links == null || selectedLink >= t.links.size()) return;
         MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
         int bottom = getHeight() - softBarHeight();
-        // Screen Y of link top/bottom
         int y1 = top + (lr.y1 - t.scrollY);
         int y2 = top + (lr.y2 - t.scrollY);
-        // Skip if completely outside content area
         if (y2 < top || y1 > bottom) return;
-        // Clamp
         if (y1 < top) y1 = top;
         if (y2 > bottom) y2 = bottom;
         if (y2 <= y1) return;
         int x1 = Math.max(1, lr.x1);
         int x2 = Math.min(getWidth() - 2, lr.x2);
         if (x2 <= x1) x2 = x1 + 20;
-        // Orange focus rectangle
         g.setColor(0xFF6600);
         g.drawRect(x1 - 1, y1 - 1, (x2 - x1) + 2, (y2 - y1) + 2);
         g.drawRect(x1, y1, x2 - x1, y2 - y1);
-        // Number badge
-        g.setColor(0xFF6600);
         g.fillRect(x1, y1, 12, 10);
         g.setColor(0xFFFFFF);
         g.setFont(font);
@@ -671,7 +853,7 @@ class BrowserCanvas extends Canvas {
             String[] entry = (String[]) midlet.speedDial.elementAt(i);
             int shade = 0x335577 + (i * 0x111122);
             if (shade > 0xFFFFFF) shade = 0xFFFFFF;
-            if (i == selectedLink) shade = 0xFF8800;   // highlight ô đang chọn bằng phím
+            if (i == selectedLink) shade = 0xFF8800;
             g.setColor(shade);
             g.fillRoundRect(x, y, cw, ch, 8, 8);
             g.setColor(i == selectedLink ? 0xFFFF00 : 0xFFFFFF);
@@ -687,6 +869,15 @@ class BrowserCanvas extends Canvas {
             int tw = font.stringWidth(title);
             g.drawString(title, x + (cw - tw) / 2, y + ch - font.getHeight() - 4, Graphics.TOP | Graphics.LEFT);
         }
+    }
+
+    // Ô Speed Dial tại toạ độ (x, y) — dùng đúng công thức chia ô như drawSpeedDial
+    int dialIndexAt(int x, int y) {
+        int top = urlBarHeight(), bottom = getHeight() - softBarHeight();
+        int cellW = getWidth() / 3, cellH = (bottom - top) / 3;
+        if (cellW <= 0 || cellH <= 0 || y < top || y >= bottom) return -1;
+        int col = Math.min(2, x / cellW), row = Math.min(2, (y - top) / cellH);
+        return row * 3 + col;
     }
 
     String dots(int n) {
@@ -709,7 +900,6 @@ class BrowserCanvas extends Canvas {
         int imgH = t.image.getHeight();
         t.scrollY += dy;
         if (t.scrollY < 0) t.scrollY = 0;
-        // Allow scrolling until the bottom of the image is at the bottom of the view
         int max = Math.max(0, imgH - viewH);
         if (t.scrollY > max) t.scrollY = max;
         repaint();
@@ -719,8 +909,8 @@ class BrowserCanvas extends Canvas {
     //  TOUCH — kiểu Chrome Android
     // ═══════════════════════════════════════════════════════════
 
-    /** Tìm link tại toạ độ màn hình (x, y). Vùng bấm nới theo độ rộng màn hình,
-     *  nếu nhiều link chồng nhau thì chọn link có tâm gần điểm chạm nhất. */
+    /** Tìm link tại toạ độ màn hình. Vùng bấm nới theo độ rộng màn hình,
+     *  nhiều link chồng nhau thì chọn link có tâm gần điểm chạm nhất. */
     int linkAt(int x, int y) {
         MiniBrowser.Tab t = midlet.activeTab();
         if (t.image == null || t.links == null) return -1;
@@ -739,13 +929,26 @@ class BrowserCanvas extends Canvas {
         return best;
     }
 
+    boolean inContent(int y) {
+        return y >= urlBarHeight() && y < getHeight() - softBarHeight();
+    }
+
     protected void pointerPressed(int x, int y) {
         momentumCancelled = true;                       // chạm vào để dừng fling
         touchSlop = Math.max(6, Math.min(getWidth(), getHeight()) / 30);
         pressX = x; pressY = y; pressTime = System.currentTimeMillis();
         lastDragY = y; lastDragTime = pressTime;
         velocity = 0; isDragging = false; longPressed = false;
-        selectedLink = (y >= urlBarHeight()) ? linkAt(x, y) : -1;   // phản hồi ngay khi chạm
+        if (inContent(y)) {
+            if (MiniBrowser.HOME.equals(midlet.activeTab().url)) {
+                int idx = dialIndexAt(x, y);
+                selectedLink = (idx >= 0 && idx < midlet.speedDial.size()) ? idx : -1;
+            } else {
+                selectedLink = linkAt(x, y);            // phản hồi ngay khi chạm
+            }
+        } else {
+            selectedLink = -1;
+        }
         repaint();
         startLongPress(x, y);
     }
@@ -774,7 +977,7 @@ class BrowserCanvas extends Canvas {
 
     protected void pointerReleased(int x, int y) {
         cancelLongPress();
-        if (longPressed) { selectedLink = -1; repaint(); return; }   // long-press đã xử lý
+        if (longPressed) { selectedLink = -1; repaint(); return; }
 
         if (isDragging) {                                            // vuốt → fling
             if (Math.abs(velocity) > 1.5f) applyMomentum(velocity);
@@ -782,10 +985,10 @@ class BrowserCanvas extends Canvas {
         }
 
         // ===== TAP =====
-        boolean onLink = (y >= urlBarHeight()) && linkAt(x, y) >= 0;
+        boolean onLink = inContent(y) && linkAt(x, y) >= 0;
         long now = System.currentTimeMillis();
         // Double-tap chỉ áp dụng ở vùng trống (tap vào link phải mở link ngay)
-        if (!onLink && now - lastTapTime < 300
+        if (!onLink && inContent(y) && now - lastTapTime < 300
             && Math.abs(x - lastTapX) < touchSlop * 3 && Math.abs(y - lastTapY) < touchSlop * 3) {
             handleDoubleTap(x, y); lastTapTime = 0; return;
         }
@@ -827,11 +1030,18 @@ class BrowserCanvas extends Canvas {
         MiniBrowser.Tab t = midlet.activeTab();
         selectedLink = -1;
 
+        // Thanh phím mềm (vì đã toàn màn hình nên phải tự xử lý chạm)
+        if (y >= getHeight() - softBarHeight()) {
+            if (x < getWidth() / 2) midlet.showMenu();
+            else midlet.goBack();
+            return;
+        }
+
         if (y < ubH) {
             int btnW = 14;
             if (x < btnW + 4) { midlet.goBack(); return; }
             if (x > getWidth() - btnW - 4) {
-                if (loading) { midlet.abortCurrent(); setStatus("Đã dừng"); }
+                if (loading) midlet.stopLoad();
                 else midlet.reload();
                 return;
             }
@@ -839,24 +1049,17 @@ class BrowserCanvas extends Canvas {
             return;
         }
 
-        if ("home://".equals(t.url)) {
-            int w = getWidth(), h = getHeight() - ubH;
-            int col = Math.min(2, x * 3 / w);                 // clamp: tránh lệch ô khi w không chia hết cho 3
-            int row = Math.min(2, (y - ubH) * 3 / h);
-            int idx = row * 3 + col;
-            if (idx >= 0 && idx < midlet.speedDial.size()) {
-                String[] entry = (String[]) midlet.speedDial.elementAt(idx);
-                t.url = entry[1]; t.image = null; t.links = null; t.scrollY = 0;
-                midlet.loadAsync(entry[1]);
-            }
+        if (MiniBrowser.HOME.equals(t.url)) {
+            int idx = dialIndexAt(x, y);
+            if (idx >= 0 && idx < midlet.speedDial.size()) openSpeedDial(idx);
+            else repaint();
             return;
         }
 
         int i = linkAt(x, y);
         if (i >= 0) {
             MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
-            t.url = lr.url; t.image = null; t.links = null; t.scrollY = 0;
-            midlet.loadAsync(lr.url);
+            midlet.navigate(lr.url);
         }
         repaint();
     }
@@ -874,7 +1077,7 @@ class BrowserCanvas extends Canvas {
 
     // Nhấn giữ link → hiện URL (Alert tự tắt sau 3s)
     void longPress(int x, int y) {
-        if (y < urlBarHeight()) return;
+        if (!inContent(y)) return;
         MiniBrowser.Tab t = midlet.activeTab();
         int i = linkAt(x, y);
         if (i < 0) return;
@@ -884,52 +1087,38 @@ class BrowserCanvas extends Canvas {
         midlet.display.setCurrent(a, this);
     }
 
-    // ── Phím: điều hướng chuẩn (ô cam focus link) ──
-    // UP/DOWN (2/8): chuyển link trước/sau (ô cam), tự cuộn theo
-    // LEFT/RIGHT (4/6): cuộn trang
-    // FIRE / 5 / 0: mở link đang focus
-    // * : về đầu trang
-    // # : reload
-    // Soft left: Menu | Soft right: Back
+    // ═══════════════════════════════════════════════════════════
+    //  PHÍM — kiểu Opera Mini
+    //   Lên/Xuống (2/8) : chọn link trước/sau (ô cam), tự cuộn theo
+    //   Trái/Phải (4/6) : cuộn 1 trang
+    //   OK / 5 / 0      : mở link đang chọn
+    //   *               : đầu trang      #: cuối trang
+    //   1: URL/tìm kiếm  3: trang chủ  7: tải lại/dừng  9: bookmark
+    //   Phím mềm trái: Menu   Phím mềm phải / Clear: Lùi
+    // ═══════════════════════════════════════════════════════════
     protected void keyPressed(int keyCode) {
-        // Soft keys
-        if (keyCode == -6 || keyCode == 21) {
-            midlet.showMenu();
-            return;
-        }
-        if (keyCode == -7 || keyCode == 22) {
-            midlet.goBack();
-            return;
-        }
+        momentumCancelled = true;
+
+        if (keyCode == -6 || keyCode == -21 || keyCode == 21) { midlet.showMenu(); return; }
+        if (keyCode == -7 || keyCode == -22 || keyCode == 22 || keyCode == -8) { midlet.goBack(); return; }
 
         int action = 0;
         try { action = getGameAction(keyCode); } catch (Exception e) {}
 
         MiniBrowser.Tab t = midlet.activeTab();
 
-        // Home / Speed Dial
-        if ("home://".equals(t.url)) {
+        if (MiniBrowser.HOME.equals(t.url)) {
             handleHomeKeys(keyCode, action);
             return;
         }
 
-        // WAP / Opera Mini style
-        // Up/Down: focus link trước/sau (ô cam)
-        // Left/Right: cuộn trang tự do (page jump)
-        // Fire/5/0: mở link
         int viewH = contentViewH();
+        boolean hasLinks = t.links != null && t.links.size() > 0;
+
         if (action == UP || keyCode == KEY_NUM2) {
-            if (t.links != null && t.links.size() > 0) {
-                moveLinkSelection(-1);
-            } else {
-                scroll(-32);
-            }
+            if (hasLinks) moveLinkSelection(-1); else scroll(-32);
         } else if (action == DOWN || keyCode == KEY_NUM8) {
-            if (t.links != null && t.links.size() > 0) {
-                moveLinkSelection(1);
-            } else {
-                scroll(32);
-            }
+            if (hasLinks) moveLinkSelection(1); else scroll(32);
         } else if (action == LEFT || keyCode == KEY_NUM4) {
             scroll(-(viewH - 20));
         } else if (action == RIGHT || keyCode == KEY_NUM6) {
@@ -938,17 +1127,22 @@ class BrowserCanvas extends Canvas {
             activateSelectedLink();
         } else if (keyCode == KEY_STAR) {
             t.scrollY = 0;
-            selectedLink = (t.links != null && t.links.size() > 0) ? 0 : -1;
-            if (selectedLink >= 0) ensureVisible();
+            autoFocus();
             repaint();
         } else if (keyCode == KEY_POUND) {
-            // Cuộn về cuối trang
             if (t.image != null) {
-                int max = Math.max(0, t.image.getHeight() - viewH);
-                t.scrollY = max;
-                selectedLink = -1;
+                t.scrollY = Math.max(0, t.image.getHeight() - viewH);
+                selectedLink = hasLinks ? firstVisibleLink(t, false) : -1;
                 repaint();
             }
+        } else if (keyCode == KEY_NUM1) {
+            midlet.promptUrl();
+        } else if (keyCode == KEY_NUM3) {
+            midlet.goHome();
+        } else if (keyCode == KEY_NUM7) {
+            if (loading) midlet.stopLoad(); else midlet.reload();
+        } else if (keyCode == KEY_NUM9) {
+            midlet.showBookmarks();
         }
     }
 
@@ -956,13 +1150,13 @@ class BrowserCanvas extends Canvas {
         int action = 0;
         try { action = getGameAction(keyCode); } catch (Exception e) {}
         MiniBrowser.Tab t = midlet.activeTab();
+        if (MiniBrowser.HOME.equals(t.url)) return;
         int viewH = contentViewH();
+        boolean hasLinks = t.links != null && t.links.size() > 0;
         if (action == UP || keyCode == KEY_NUM2) {
-            if (t.links != null && t.links.size() > 0) moveLinkSelection(-1);
-            else scroll(-48);
+            if (hasLinks) moveLinkSelection(-1); else scroll(-48);
         } else if (action == DOWN || keyCode == KEY_NUM8) {
-            if (t.links != null && t.links.size() > 0) moveLinkSelection(1);
-            else scroll(48);
+            if (hasLinks) moveLinkSelection(1); else scroll(48);
         } else if (action == LEFT || keyCode == KEY_NUM4) {
             scroll(-(viewH - 20));
         } else if (action == RIGHT || keyCode == KEY_NUM6) {
@@ -974,26 +1168,25 @@ class BrowserCanvas extends Canvas {
         int n = midlet.speedDial.size();
         if (n == 0) return;
 
-        // Số 1-9: mở thẳng speed dial
+        // Số 1-9: mở thẳng ô speed dial
         if (keyCode >= KEY_NUM1 && keyCode <= KEY_NUM9) {
             int idx = keyCode - KEY_NUM1;
             if (idx < n) openSpeedDial(idx);
             return;
         }
 
-        // D-pad điều hướng lưới 3x3
         int cols = 3;
-        if (selectedLink < 0) selectedLink = 0;
+        if (selectedLink < 0 || selectedLink >= n) selectedLink = 0;
 
-        if (action == UP || keyCode == KEY_NUM2) {
+        if (action == UP) {
             selectedLink = Math.max(0, selectedLink - cols);
-        } else if (action == DOWN || keyCode == KEY_NUM8) {
+        } else if (action == DOWN) {
             selectedLink = Math.min(n - 1, selectedLink + cols);
-        } else if (action == LEFT || keyCode == KEY_NUM4) {
+        } else if (action == LEFT) {
             if (selectedLink % cols != 0) selectedLink--;
-        } else if (action == RIGHT || keyCode == KEY_NUM6) {
+        } else if (action == RIGHT) {
             if (selectedLink % cols != cols - 1 && selectedLink < n - 1) selectedLink++;
-        } else if (action == FIRE || keyCode == KEY_NUM5 || keyCode == KEY_NUM0) {
+        } else if (action == FIRE || keyCode == KEY_NUM0) {
             openSpeedDial(selectedLink);
             return;
         }
@@ -1003,24 +1196,54 @@ class BrowserCanvas extends Canvas {
     void openSpeedDial(int idx) {
         if (idx < 0 || idx >= midlet.speedDial.size()) return;
         String[] entry = (String[]) midlet.speedDial.elementAt(idx);
-        MiniBrowser.Tab t = midlet.activeTab();
-        t.url = entry[1];
-        t.image = null;
-        t.links = null;
-        t.scrollY = 0;
         selectedLink = -1;
-        midlet.loadAsync(entry[1]);
+        midlet.navigate(entry[1]);
+    }
+
+    // ── Chọn link ──
+    boolean isLinkVisible(MiniBrowser.Tab t, MiniBrowser.LinkRect lr) {
+        return lr.y2 >= t.scrollY && lr.y1 <= t.scrollY + contentViewH();
+    }
+
+    // Link nhìn thấy đầu tiên (fromTop) hoặc cuối cùng; -1 nếu không có (links đã sắp theo vị trí)
+    int firstVisibleLink(MiniBrowser.Tab t, boolean fromTop) {
+        if (t.links == null) return -1;
+        int n = t.links.size();
+        for (int k = 0; k < n; k++) {
+            int i = fromTop ? k : n - 1 - k;
+            MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(i);
+            if (isLinkVisible(t, lr)) return i;
+        }
+        return -1;
+    }
+
+    // Gọi khi trang vừa tải xong: đặt con trỏ ở link đầu tiên nhìn thấy (không tự cuộn trang)
+    void autoFocus() {
+        MiniBrowser.Tab t = midlet.activeTab();
+        selectedLink = firstVisibleLink(t, true);
     }
 
     void moveLinkSelection(int delta) {
         MiniBrowser.Tab t = midlet.activeTab();
         if (t.links == null || t.links.size() == 0) return;
-
         int n = t.links.size();
-        if (selectedLink < 0) {
-            selectedLink = (delta > 0) ? 0 : n - 1;
+
+        boolean valid = selectedLink >= 0 && selectedLink < n
+            && isLinkVisible(t, (MiniBrowser.LinkRect) t.links.elementAt(selectedLink));
+
+        if (!valid) {
+            // Chưa chọn, hoặc link đang chọn đã cuộn khỏi màn hình → bắt đầu từ link nhìn thấy
+            int i = firstVisibleLink(t, delta > 0);
+            selectedLink = (i >= 0) ? i : (delta > 0 ? 0 : n - 1);
         } else {
-            selectedLink = (selectedLink + delta + n) % n;
+            // Một link xuống nhiều dòng có thể có nhiều vùng cùng URL → bỏ qua các vùng trùng
+            String cur = ((MiniBrowser.LinkRect) t.links.elementAt(selectedLink)).url;
+            int i = selectedLink;
+            for (int k = 0; k < n; k++) {
+                i = (i + delta + n) % n;
+                if (!cur.equals(((MiniBrowser.LinkRect) t.links.elementAt(i)).url)) break;
+            }
+            selectedLink = i;
         }
         ensureVisible();
         repaint();
@@ -1028,33 +1251,33 @@ class BrowserCanvas extends Canvas {
 
     void activateSelectedLink() {
         MiniBrowser.Tab t = midlet.activeTab();
-        if (selectedLink < 0 || t.links == null || selectedLink >= t.links.size()) {
-            // Nếu chưa chọn link nào → chọn link đầu tiên nhìn thấy hoặc link đầu
-            if (t.links != null && t.links.size() > 0) {
-                selectedLink = 0;
-                ensureVisible();
-                repaint();
-            }
+        if (t.links == null || t.links.size() == 0) return;
+        if (selectedLink < 0 || selectedLink >= t.links.size()) {
+            autoFocus();
+            if (selectedLink < 0) { selectedLink = 0; ensureVisible(); }
+            repaint();
             return;
         }
         MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
-        t.url = lr.url;
-        t.image = null;
-        t.links = null;
-        t.scrollY = 0;
+        if (!isLinkVisible(t, lr)) {                 // link đã cuộn khỏi màn hình → đưa vào tầm nhìn trước
+            ensureVisible();
+            repaint();
+            return;
+        }
         selectedLink = -1;
-        midlet.loadAsync(lr.url);
+        midlet.navigate(lr.url);
     }
 
     void ensureVisible() {
         MiniBrowser.Tab t = midlet.activeTab();
-        if (selectedLink < 0 || t.links == null || selectedLink >= t.links.size()) return;
+        if (t.image == null || selectedLink < 0 || t.links == null || selectedLink >= t.links.size()) return;
         MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
         int viewH = contentViewH();
-        if (lr.y1 < t.scrollY) t.scrollY = lr.y1;
+        if (lr.y1 < t.scrollY) t.scrollY = lr.y1 - 8;
         else if (lr.y2 > t.scrollY + viewH) t.scrollY = lr.y2 - viewH + 8;
         if (t.scrollY < 0) t.scrollY = 0;
+        int max = Math.max(0, t.image.getHeight() - viewH);
+        if (t.scrollY > max) t.scrollY = max;
         repaint();
     }
 }
-
