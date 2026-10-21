@@ -6,6 +6,7 @@ import java.lang.reflect.Field;
 import java.net.*;
 import java.util.*;
 import java.util.List;
+import java.util.regex.*;
 import javax.imageio.ImageIO;
 import javax.xml.parsers.DocumentBuilderFactory;
 
@@ -16,15 +17,26 @@ import org.xhtmlrenderer.simple.Graphics2DRenderer;
 import org.xhtmlrenderer.swing.NaiveUserAgent;
 
 public class MiniProxy {
-    static final int PAGE_WIDTH = 240;
-    static final int RENDER_HEIGHT = 8000;
     static final int PORT = 9999;
+    static final int MAX_RENDER_HEIGHT = 8000;
+    static final int MAX_PIXELS = 2000000;   // ~2M pixels → giới hạn heap client
+    static final int MAX_URL_LEN = 4096;
+    static final int MAX_REDIRECTS = 5;
+
     static final String UA =
         "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) MiniProxy/4.0 Mobile Safari/537.36";
+        "(KHTML, like Gecko) MiniProxy/5.0 Mobile Safari/537.36";
 
-    // Cookie toàn cục (session persistence)
     static final CookieManager cookieManager = new CookieManager();
+
+    static final Pattern META_REFRESH = Pattern.compile(
+        "<meta[^>]*?http-equiv\\s*=\\s*[\"']?refresh[\"']?[^>]*?content\\s*=\\s*[\"']?\\s*\\d+\\s*;\\s*url\\s*=\\s*[\"']?([^\"'\\s>]+)",
+        Pattern.CASE_INSENSITIVE);
+
+    static final Pattern JS_REDIR = Pattern.compile(
+        "(?:window\\.|document\\.|top\\.|self\\.|parent\\.)?location(?:\\.href)?\\s*=\\s*[\"']([^\"']+)[\"']|" +
+        "(?:window\\.|document\\.|top\\.|self\\.|parent\\.)?location\\.(?:replace|assign)\\s*\\(\\s*[\"']([^\"']+)[\"']\\s*\\)",
+        Pattern.CASE_INSENSITIVE);
 
     public static void main(String[] args) throws Exception {
         System.setProperty("java.awt.headless", "true");
@@ -33,12 +45,10 @@ public class MiniProxy {
 
         ensureTempDir();
         checkFonts();
-
-        // Khởi tạo cookie manager
         CookieHandler.setDefault(cookieManager);
 
         ServerSocket ss = new ServerSocket(PORT);
-        System.out.println("MiniProxy v4.0 listening on " + PORT);
+        System.out.println("MiniProxy v5.0 listening on " + PORT);
         while (true) {
             final Socket s = ss.accept();
             new Thread(new Runnable() {
@@ -47,7 +57,6 @@ public class MiniProxy {
         }
     }
 
-    // ── Font check ──
     static void checkFonts() {
         try {
             String[] fonts = GraphicsEnvironment.getLocalGraphicsEnvironment()
@@ -94,29 +103,34 @@ public class MiniProxy {
         catch (IllegalArgumentException e) { return new URL(spec); }
     }
 
-    // ── Protocol handler ──
+    // ── Protocol v5 ──
     static void handle(Socket s) {
         DataInputStream in = null;
         DataOutputStream out = null;
         try {
             in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
             out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+
+            int screenW = in.readInt();
+            int screenH = in.readInt();
             int urlLen = in.readInt();
+            if (urlLen <= 0 || urlLen > MAX_URL_LEN) throw new IOException("Bad urlLen");
             byte[] urlBytes = new byte[urlLen];
             in.readFully(urlBytes);
             String url = new String(urlBytes, "UTF-8");
-            System.out.println("Request: " + url);
+
+            int renderW = Math.max(200, Math.min(480, screenW));
+            System.out.println("Request [w=" + screenW + ", renderW=" + renderW + "]: " + url);
 
             Page page;
             try {
-                page = render(url);
+                page = render(url, renderW, screenH);
             } catch (Exception e) {
                 System.err.println("Render failed: " + e);
                 e.printStackTrace();
-                page = errorPage("Lỗi render: " + e.getMessage());
+                page = errorPage("Lỗi render: " + e.getMessage(), renderW);
             }
 
-            // Gửi ảnh đã tối ưu
             out.writeInt(page.image.getWidth());
             out.writeInt(page.image.getHeight());
             ByteArrayOutputStream imgBuf = new ByteArrayOutputStream();
@@ -142,12 +156,16 @@ public class MiniProxy {
         }
     }
 
-    // ── Render chính ──
-    static Page render(String url) throws Exception {
-        String html = fetchHtml(url);
+    // ── Render ──
+    static Page render(String url, int renderW, int screenH) throws Exception {
+        // 1. Fetch + follow redirects (google, meta, JS)
+        String[] fetchResult = fetchWithRedirects(url);
+        String html = fetchResult[0];
+        String finalUrl = fetchResult[1];
+        System.out.println("  → final: " + finalUrl);
 
-        // 1. HTML → XHTML qua jsoup
-        org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, url);
+        // 2. HTML → XHTML
+        org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, finalUrl);
         jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas").remove();
         jsoupDoc.outputSettings()
                 .syntax(org.jsoup.nodes.Document.OutputSettings.Syntax.xml)
@@ -163,52 +181,52 @@ public class MiniProxy {
             xhtml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + xhtml;
         }
 
-        // 2. Parse XML
         Document dom;
-        try {
-            dom = parseXml(xhtml, true);
-        } catch (Exception e1) {
-            System.err.println("namespaceAware=true fail: " + e1.getMessage());
+        try { dom = parseXml(xhtml, true); }
+        catch (Exception e1) {
+            System.err.println("  nsAware=true fail: " + e1.getMessage());
             dom = parseXml(xhtml, false);
         }
 
-        // 3. Render với Graphics2DRenderer
+        // 3. Render height theo width
+        int renderH = Math.min(MAX_RENDER_HEIGHT,
+                               Math.max(3000, MAX_PIXELS / Math.max(240, renderW)));
+
         Graphics2DRenderer renderer = new Graphics2DRenderer();
-        renderer.setDocument(dom, url);
+        renderer.setDocument(dom, finalUrl);
         renderer.getSharedContext().setUserAgentCallback(new ProxyUserAgent());
 
-        BufferedImage fullImg = new BufferedImage(PAGE_WIDTH, RENDER_HEIGHT, BufferedImage.TYPE_INT_RGB);
+        BufferedImage fullImg = new BufferedImage(renderW, renderH, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = fullImg.createGraphics();
         g.setColor(Color.WHITE);
-        g.fillRect(0, 0, PAGE_WIDTH, RENDER_HEIGHT);
+        g.fillRect(0, 0, renderW, renderH);
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
 
-        renderer.layout(g, new Dimension(PAGE_WIDTH, RENDER_HEIGHT));
+        renderer.layout(g, new Dimension(renderW, renderH));
         renderer.render(g);
         g.dispose();
 
-        // 4. Crop
-        int usedH = RENDER_HEIGHT;
+        int usedH = renderH;
         try {
             Rectangle minSize = renderer.getMinimumSize();
             if (minSize != null && minSize.height > 0) {
-                usedH = Math.min(RENDER_HEIGHT, minSize.height + 12);
+                usedH = Math.min(renderH, minSize.height + 12);
             }
         } catch (Exception e) {}
         if (usedH < 40) usedH = 40;
 
-        BufferedImage result = new BufferedImage(PAGE_WIDTH, usedH, BufferedImage.TYPE_INT_RGB);
+        BufferedImage result = new BufferedImage(renderW, usedH, BufferedImage.TYPE_INT_RGB);
         Graphics2D rg = result.createGraphics();
         rg.drawImage(fullImg, 0, 0, null);
         rg.dispose();
 
-        // 5. TỐI ƯU PNG: quantize xuống 256 màu
+        // 4. Quantize (giảm size)
         result = quantizeToIndexed(result);
 
-        // 6. Links
+        // 5. Links
         List<Link> links = new ArrayList<>();
         try {
             Field panelField = Graphics2DRenderer.class.getDeclaredField("panel");
@@ -216,18 +234,81 @@ public class MiniProxy {
             Object panel = panelField.get(renderer);
             java.lang.reflect.Method getRootBox = panel.getClass().getMethod("getRootBox");
             Box root = (Box) getRootBox.invoke(panel);
-            if (root != null) collectLinks(root, links, url);
+            if (root != null) collectLinks(root, links, finalUrl);
         } catch (Exception e) {
-            System.err.println("Link extract fail: " + e);
+            System.err.println("  Link extract fail: " + e);
         }
 
         return new Page(result, links);
     }
 
-    // ── Quantize PNG: giảm màu để giảm kích thước ──
+    // ── Fetch + redirects ──
+    static String[] fetchWithRedirects(String url) throws Exception {
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < MAX_REDIRECTS; i++) {
+            if (seen.contains(url)) throw new IOException("Redirect loop: " + url);
+            seen.add(url);
+
+            // Google redirect decode TRƯỚC fetch
+            String decoded = decodeGoogleRedirect(url);
+            if (decoded != null && !decoded.equals(url)) {
+                if (seen.contains(decoded)) throw new IOException("Google redirect loop");
+                seen.add(decoded);
+                System.out.println("  Google decode: " + decoded);
+                url = decoded;
+            }
+
+            String html = fetchHtml(url);
+            String sample = html.length() > 10000 ? html.substring(0, 10000) : html;
+
+            // Meta refresh
+            Matcher m = META_REFRESH.matcher(sample);
+            if (m.find()) {
+                String r = resolveUrl(url, m.group(1).trim());
+                if (!r.equals(url)) {
+                    System.out.println("  Meta refresh: " + r);
+                    url = r;
+                    continue;
+                }
+            }
+
+            // JS redirect
+            Matcher jm = JS_REDIR.matcher(sample);
+            if (jm.find()) {
+                String target = jm.group(1) != null ? jm.group(1) : jm.group(2);
+                if (target != null) {
+                    String r = resolveUrl(url, target.trim());
+                    if (!r.equals(url) && (r.startsWith("http://") || r.startsWith("https://"))) {
+                        System.out.println("  JS redirect: " + r);
+                        url = r;
+                        continue;
+                    }
+                }
+            }
+
+            return new String[]{ html, url };
+        }
+        throw new IOException("Quá nhiều redirect");
+    }
+
+    static String decodeGoogleRedirect(String url) {
+        if (!url.contains("google.") || !url.contains("/url")) return null;
+        try {
+            URI uri = URI.create(url);
+            String query = uri.getRawQuery();
+            if (query == null) return null;
+            for (String p : query.split("&")) {
+                if (p.startsWith("q=") || p.startsWith("url=")) {
+                    String v = URLDecoder.decode(p.substring(p.indexOf('=') + 1), "UTF-8");
+                    if (v.startsWith("http://") || v.startsWith("https://")) return v;
+                }
+            }
+        } catch (Exception e) {}
+        return null;
+    }
+
     static BufferedImage quantizeToIndexed(BufferedImage src) {
         int w = src.getWidth(), h = src.getHeight();
-        // Tạo bảng màu 256 màu (web-safe 6x6x6 + vài màu xám)
         byte[] r = new byte[256], g = new byte[256], b = new byte[256];
         int idx = 0;
         for (int ri = 0; ri < 6; ri++)
@@ -238,7 +319,6 @@ public class MiniProxy {
                     b[idx] = (byte)(bi * 51);
                     idx++;
                 }
-        // Thêm 40 mức xám
         for (int i = 0; i < 40; i++) {
             byte v = (byte)(i * 6);
             r[idx] = g[idx] = b[idx] = v;
@@ -293,10 +373,10 @@ public class MiniProxy {
         }
     }
 
-    static Page errorPage(String msg) {
-        BufferedImage img = new BufferedImage(PAGE_WIDTH, 220, BufferedImage.TYPE_INT_RGB);
+    static Page errorPage(String msg, int width) {
+        BufferedImage img = new BufferedImage(width, 220, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
-        g.setColor(Color.WHITE); g.fillRect(0, 0, PAGE_WIDTH, 220);
+        g.setColor(Color.WHITE); g.fillRect(0, 0, width, 220);
         g.setColor(new Color(200, 0, 0));
         g.setFont(new Font("SansSerif", Font.BOLD, 13));
         g.drawString("Lỗi render", 10, 26);
@@ -348,9 +428,7 @@ public class MiniProxy {
                 c.setReadTimeout(6000);
                 c.setInstanceFollowRedirects(true);
                 return c.getInputStream();
-            } catch (IOException e) {
-                return null;
-            }
+            } catch (IOException e) { return null; }
         }
     }
 
