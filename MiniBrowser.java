@@ -897,7 +897,7 @@ class BrowserCanvas extends Canvas {
             int idx = keyCode - KEY_NUM1;
             if (t.links != null && idx < t.links.size()) {
                 selectedLink = idx;
-                ensureVisible(t);
+                ensureVisible();
                 repaint();
             }
             return;
