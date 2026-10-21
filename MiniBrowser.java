@@ -431,7 +431,8 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             Tab t = activeTab();
             t.url = url; t.image = img; t.links = links; t.scrollY = 0;
             t.lastBytes = imgData.length;
-            canvas.selectedLink = -1;   // FIX: không giữ highlight link của trang cũ
+            // Auto-focus first link (feature phone standard — PicoBrowser / Opera Mini style)
+            canvas.selectedLink = (links != null && links.size() > 0) ? 0 : -1;
 
             canvas.stopLoading(); canvas.repaint();
             canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB)");
@@ -859,13 +860,14 @@ class BrowserCanvas extends Canvas {
         midlet.display.setCurrent(a, this);
     }
 
-    // ── Phím: điều khiển kiểu trình duyệt chuẩn (J2ME / feature phone) ──
-    // UP/DOWN (2/8): cuộn trang
-    // LEFT/RIGHT (4/6): chuyển focus link trước/sau
-    // FIRE / 5 / 0: kích hoạt link đang chọn (mở URL)
+    // ── Phím: kiểu feature phone chuẩn (PicoBrowser / Opera Mini style) ──
+    // UP/DOWN (2/8): cuộn nhỏ
+    // LEFT/RIGHT (4/6): page up / page down (nhảy lớn)
+    // FIRE / 5: mở link đang focus
+    // 1-9: chọn link thứ N trên trang (nếu có)
     // * : về đầu trang
     // # : reload
-    // Soft keys: Menu / Back (đã gắn Command)
+    // Soft left: Menu | Soft right: Back
     protected void keyPressed(int keyCode) {
         // Soft keys (Nokia-style and common mappings)
         if (keyCode == -6 || keyCode == 21) { // Left soft
@@ -888,20 +890,35 @@ class BrowserCanvas extends Canvas {
             return;
         }
 
+        int viewH = contentViewH();
+
+        // Số 1-9: chọn link thứ N (nếu trang có đủ link)
+        if (keyCode >= KEY_NUM1 && keyCode <= KEY_NUM9) {
+            int idx = keyCode - KEY_NUM1;
+            if (t.links != null && idx < t.links.size()) {
+                selectedLink = idx;
+                ensureVisible(t);
+                repaint();
+            }
+            return;
+        }
+
         // Trang nội dung
         if (action == UP || keyCode == KEY_NUM2) {
             scroll(-32);
         } else if (action == DOWN || keyCode == KEY_NUM8) {
             scroll(32);
         } else if (action == LEFT || keyCode == KEY_NUM4) {
-            moveLinkSelection(-1);
+            // Page up (PicoBrowser style)
+            scroll(-viewH + 20);
         } else if (action == RIGHT || keyCode == KEY_NUM6) {
-            moveLinkSelection(1);
+            // Page down
+            scroll(viewH - 20);
         } else if (action == FIRE || keyCode == KEY_NUM5 || keyCode == KEY_NUM0) {
             activateSelectedLink();
         } else if (keyCode == KEY_STAR) {
             t.scrollY = 0;
-            selectedLink = -1;
+            selectedLink = (t.links != null && t.links.size() > 0) ? 0 : -1;
             repaint();
         } else if (keyCode == KEY_POUND) {
             midlet.reload();
@@ -911,14 +928,15 @@ class BrowserCanvas extends Canvas {
     protected void keyRepeated(int keyCode) {
         int action = 0;
         try { action = getGameAction(keyCode); } catch (Exception e) {}
+        int viewH = contentViewH();
         if (action == UP || keyCode == KEY_NUM2) {
             scroll(-48);
         } else if (action == DOWN || keyCode == KEY_NUM8) {
             scroll(48);
         } else if (action == LEFT || keyCode == KEY_NUM4) {
-            moveLinkSelection(-1);
+            scroll(-viewH + 20);
         } else if (action == RIGHT || keyCode == KEY_NUM6) {
-            moveLinkSelection(1);
+            scroll(viewH - 20);
         }
     }
 
