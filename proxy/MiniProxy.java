@@ -47,7 +47,7 @@ public class MiniProxy {
         checkFonts();
         CookieHandler.setDefault(cookieManager);
 
-        ServerSocket ss = new ServerSocket(PORT);
+        ServerSocket ss = new ServerSocket(PORT, 50, java.net.InetAddress.getByName("0.0.0.0"));
         System.out.println("MiniProxy v5.0 listening on " + PORT);
         while (true) {
             final Socket s = ss.accept();

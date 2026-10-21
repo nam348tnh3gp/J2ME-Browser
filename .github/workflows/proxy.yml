@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       duckdns_domain:
-        description: 'DuckDNS subdomain (e.g. myproxy)'
-        required: true
+        description: 'DuckDNS subdomain (optional, for reference)'
+        required: false
       duckdns_token:
-        description: 'DuckDNS token'
-        required: true
+        description: 'DuckDNS token (optional)'
+        required: false
 
 jobs:
   proxy:
@@ -23,27 +23,52 @@ jobs:
           java-version: '8'
           distribution: 'temurin'
 
-      - name: Install Chromium
+      - name: Install Chromium and cloudflared
         run: |
           sudo apt-get update
           sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
-
-      - name: Get public IP and update DuckDNS
-        run: |
-          IP=$(curl -s https://api.ipify.org)
-          echo "Runner IP: $IP"
-          DOMAIN="${{ github.event.inputs.duckdns_domain }}"
-          TOKEN="${{ github.event.inputs.duckdns_token }}"
-          RESULT=$(curl -s "https://www.duckdns.org/update?domains=${DOMAIN}&token=${TOKEN}&ip=${IP}")
-          echo "DuckDNS update: $RESULT"
-          echo "Proxy will be available at ${DOMAIN}.duckdns.org:9999"
+          # Install cloudflared for NAT traversal
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
 
       - name: Compile proxy
         working-directory: proxy
         run: |
           javac -cp "libs/jsoup.jar:libs/flying-saucer-core.jar" MiniProxy.java
 
-      - name: Run proxy
+      - name: Start proxy (binds 0.0.0.0)
         working-directory: proxy
         run: |
-          java -cp ".:libs/jsoup.jar:libs/flying-saucer-core.jar" MiniProxy
+          # Explicitly bind to 0.0.0.0 so tunnel can reach it
+          java -cp ".:libs/jsoup.jar:libs/flying-saucer-core.jar" MiniProxy &
+          echo $! > /tmp/proxy.pid
+          sleep 3
+          echo "Proxy PID: $(cat /tmp/proxy.pid)"
+          ss -ltnp | grep 9999 || netstat -ltnp | grep 9999 || true
+
+      - name: Start Cloudflare Tunnel (NAT traversal)
+        run: |
+          # Quick tunnel - no account needed, gives public URL
+          cloudflared tunnel --url tcp://127.0.0.1:9999 --no-autoupdate > /tmp/tunnel.log 2>&1 &
+          echo $! > /tmp/tunnel.pid
+          sleep 8
+          echo "=== Tunnel log ==="
+          cat /tmp/tunnel.log
+          # Extract the public URL
+          URL=$(grep -o 'https://[^ ]*\.trycloudflare.com' /tmp/tunnel.log | head -1 || true)
+          if [ -z "$URL" ]; then
+            URL=$(grep -o 'tcp://[^ ]*' /tmp/tunnel.log | head -1 || true)
+          fi
+          echo "PUBLIC_ENDPOINT=$URL" >> $GITHUB_ENV
+          echo "Proxy accessible via tunnel: $URL"
+          echo ""
+          echo "Note: GitHub Actions is behind NAT. Direct DuckDNS IP update will NOT work."
+          echo "Use the Cloudflare Tunnel URL above to connect from the J2ME client."
+
+      - name: Keep alive
+        run: |
+          echo "Proxy and tunnel running. Will stay up for up to 6 hours."
+          echo "Public endpoint: $PUBLIC_ENDPOINT"
+          # Wait for proxy process
+          wait $(cat /tmp/proxy.pid) || true
