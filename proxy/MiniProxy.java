@@ -24,8 +24,8 @@ public class MiniProxy {
     static final int MAX_REDIRECTS = 5;
 
     static final String UA =
-        "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) MiniProxy/5.0 Mobile Safari/537.36";
+        "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/120.0.6099.210 Mobile Safari/537.36";
 
     static final CookieManager cookieManager = new CookieManager();
 
@@ -158,6 +158,9 @@ public class MiniProxy {
 
     // ── Render ──
     static Page render(String url, int renderW, int screenH) throws Exception {
+        // Prefer mobile versions of common sites
+        url = preferMobileUrl(url);
+
         // 1. Fetch + follow redirects (google, meta, JS)
         String[] fetchResult = fetchWithRedirects(url);
         String html = fetchResult[0];
@@ -168,11 +171,16 @@ public class MiniProxy {
         org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, finalUrl);
         jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas").remove();
 
-        // Inject mobile force-layout CSS (giúp width:100% / max-width hoạt động)
+        // Inject viewport + force mobile layout CSS
         org.jsoup.nodes.Element head = jsoupDoc.head();
         if (head == null) {
             head = jsoupDoc.prependElement("head");
         }
+        // Viewport meta — nhiều site dùng để chọn bản mobile
+        org.jsoup.nodes.Element viewport = head.appendElement("meta");
+        viewport.attr("name", "viewport");
+        viewport.attr("content", "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no");
+
         org.jsoup.nodes.Element style = head.appendElement("style");
         style.attr("type", "text/css");
         style.text(
@@ -415,8 +423,10 @@ public class MiniProxy {
     static String fetchHtml(String url) throws Exception {
         HttpURLConnection c = (HttpURLConnection) toURL(url).openConnection();
         c.setRequestProperty("User-Agent", UA);
-        c.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*");
+        c.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
         c.setRequestProperty("Accept-Language", "vi,en;q=0.8");
+        c.setRequestProperty("Accept-Encoding", "identity");
+        c.setRequestProperty("Upgrade-Insecure-Requests", "1");
         c.setConnectTimeout(10000);
         c.setReadTimeout(10000);
         c.setInstanceFollowRedirects(true);
@@ -459,4 +469,29 @@ public class MiniProxy {
         BufferedImage image; List<Link> links;
         Page(BufferedImage i, List<Link> l) { image = i; links = l; }
     }
+
+    // Ép một số site lớn sang bản mobile
+    static String preferMobileUrl(String url) {
+        if (url == null) return url;
+        String lower = url.toLowerCase();
+        // Google
+        if (lower.contains("www.google.") || lower.contains("//google.")) {
+            if (!lower.contains("/search") && !lower.contains("m.google")) {
+                return url.replaceFirst("(?i)https?://(www\.)?google\.", "https://m.google.");
+            }
+        }
+        // Wikipedia
+        if (lower.contains("wikipedia.org") && !lower.contains("m.wikipedia") && !lower.contains(".m.wikipedia")) {
+            return url.replaceFirst("(?i)https?://([a-z]{2}\.)?wikipedia\.org", "https://$1m.wikipedia.org");
+        }
+        // Facebook / YouTube basic
+        if (lower.contains("facebook.com") && !lower.contains("m.facebook") && !lower.contains("mbasic.")) {
+            return url.replaceFirst("(?i)https?://(www\.)?facebook\.com", "https://m.facebook.com");
+        }
+        if (lower.contains("youtube.com") && !lower.contains("m.youtube")) {
+            return url.replaceFirst("(?i)https?://(www\.)?youtube\.com", "https://m.youtube.com");
+        }
+        return url;
+    }
+
 }
