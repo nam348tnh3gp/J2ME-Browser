@@ -34,15 +34,15 @@ public class Prefs {
         return list;
     }
 
+    // ĐÃ SỬA: bỏ try-catch không cần thiết — put() không throws JSONException
     public void saveBookmarks(List<String[]> list) {
         JSONArray arr = new JSONArray();
-        try {
-            for (String[] e : list) {
-                JSONArray j = new JSONArray();
-                j.put(e[0]); j.put(e[1]);
-                arr.put(j);
-            }
-        } catch (JSONException ignored) {}
+        for (String[] e : list) {
+            JSONArray j = new JSONArray();
+            j.put(e[0]);
+            j.put(e[1]);
+            arr.put(j);
+        }
         sp.edit().putString("bm", arr.toString()).apply();
     }
 }
