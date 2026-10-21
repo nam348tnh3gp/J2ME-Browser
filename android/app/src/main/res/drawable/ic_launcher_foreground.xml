@@ -1,0 +1,40 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- White globe circle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,24 A30,30 0 1,0 54,84 A30,30 0 1,0 54,24 Z" />
+
+    <!-- Equator -->
+    <path
+        android:fillColor="#1E88E5"
+        android:pathData="M25,52 L83,52 L83,56 L25,56 Z" />
+
+    <!-- Central meridian (ellipse) -->
+    <path
+        android:strokeColor="#1E88E5"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:pathData="M54,24 C66,36 66,72 54,84 C42,72 42,36 54,24" />
+
+    <!-- Latitude bands -->
+    <path
+        android:strokeColor="#1E88E5"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M30,38 Q54,44 78,38" />
+    <path
+        android:strokeColor="#1E88E5"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M30,70 Q54,64 78,70" />
+
+    <!-- Small accent dot (browser "live" indicator) -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M72,72 A5,5 0 1,0 72,82 A5,5 0 1,0 72,72 Z" />
+</vector>
