@@ -440,7 +440,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             if (canvas.selectedLink >= 0) canvas.ensureVisible();
 
             canvas.stopLoading(); canvas.repaint();
-            canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB)");
+            canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB, " + links.size() + " links)");
         } catch (Exception e) {
             canvas.stopLoading();
             if (!stopRequested) {

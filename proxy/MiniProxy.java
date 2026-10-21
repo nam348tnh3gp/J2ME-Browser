@@ -594,19 +594,26 @@ public class MiniProxy {
         try {
             org.jsoup.nodes.Document doc = Jsoup.parse(html, baseUrl);
             org.jsoup.select.Elements as = doc.select("a[href]");
-            int y = 40;
+            int y = 30;
+            int lineH = 22;
             for (org.jsoup.nodes.Element a : as) {
                 String href = a.attr("href");
-                if (href == null || href.length() == 0 || href.startsWith("#") || href.startsWith("javascript:")) continue;
+                if (href == null || href.length() == 0) continue;
+                if (href.startsWith("#") || href.startsWith("javascript:") || href.startsWith("mailto:")) continue;
                 String full = resolveUrl(baseUrl, href);
                 String text = a.text();
-                if (text == null || text.trim().length() == 0) text = href;
-                // Approximate position (will be refined if FS works later)
-                int h = 18;
-                out.add(new Link(4, y, renderW - 8, y + h, full));
-                y += h + 4;
-                if (y > 3000) break;
+                if (text == null) text = "";
+                text = text.trim();
+                if (text.length() == 0) text = href;
+                // Estimate height based on text length
+                int estW = Math.max(40, Math.min(renderW - 16, text.length() * 7));
+                int h = lineH;
+                if (text.length() > 40) h = lineH * 2;
+                out.add(new Link(8, y, 8 + estW, y + h, full));
+                y += h + 6;
+                if (y > 3500 || out.size() > 80) break;
             }
+            System.out.println("  extractLinksFromHtml: " + out.size() + " links");
         } catch (Exception e) {
             System.err.println("  HTML link fallback fail: " + e.getMessage());
         }
