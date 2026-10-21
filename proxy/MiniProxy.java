@@ -477,19 +477,19 @@ public class MiniProxy {
         // Google
         if (lower.contains("www.google.") || lower.contains("//google.")) {
             if (!lower.contains("/search") && !lower.contains("m.google")) {
-                return url.replaceFirst("(?i)https?://(www\.)?google\.", "https://m.google.");
+                return url.replaceFirst("(?i)https?://(www\\.)?google\\.", "https://m.google.");
             }
         }
         // Wikipedia
         if (lower.contains("wikipedia.org") && !lower.contains("m.wikipedia") && !lower.contains(".m.wikipedia")) {
-            return url.replaceFirst("(?i)https?://([a-z]{2}\.)?wikipedia\.org", "https://$1m.wikipedia.org");
+            return url.replaceFirst("(?i)https?://([a-z]{2}\\.)?wikipedia\\.org", "https://$1m.wikipedia.org");
         }
         // Facebook / YouTube basic
         if (lower.contains("facebook.com") && !lower.contains("m.facebook") && !lower.contains("mbasic.")) {
-            return url.replaceFirst("(?i)https?://(www\.)?facebook\.com", "https://m.facebook.com");
+            return url.replaceFirst("(?i)https?://(www\\.)?facebook\\.com", "https://m.facebook.com");
         }
         if (lower.contains("youtube.com") && !lower.contains("m.youtube")) {
-            return url.replaceFirst("(?i)https?://(www\.)?youtube\.com", "https://m.youtube.com");
+            return url.replaceFirst("(?i)https?://(www\\.)?youtube\\.com", "https://m.youtube.com");
         }
         return url;
     }
