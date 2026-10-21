@@ -148,7 +148,12 @@ public class MiniProxy {
             }
             out.flush();
         } catch (Exception e) {
-            e.printStackTrace();
+            String msg = e.getMessage() == null ? "" : e.getMessage();
+            if (e instanceof java.net.SocketException && msg.contains("Broken pipe")) {
+                System.err.println("  Client disconnected (broken pipe)");
+            } else {
+                e.printStackTrace();
+            }
         } finally {
             try { if (in != null) in.close(); } catch (Exception e) {}
             try { if (out != null) out.close(); } catch (Exception e) {}
@@ -169,7 +174,17 @@ public class MiniProxy {
 
         // 2. HTML → XHTML + inject CSS ép giãn theo width
         org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, finalUrl);
-        jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas").remove();
+        jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas,svg,use").remove();
+        // Strip any xlink:* attributes (breaks XML namespace parsing on Google etc.)
+        for (org.jsoup.nodes.Element el : jsoupDoc.getAllElements()) {
+            java.util.Iterator<org.jsoup.nodes.Attribute> it = el.attributes().iterator();
+            java.util.List<String> toRemove = new java.util.ArrayList<>();
+            while (it.hasNext()) {
+                String key = it.next().getKey();
+                if (key != null && key.toLowerCase().startsWith("xlink")) toRemove.add(key);
+            }
+            for (String k : toRemove) el.removeAttr(k);
+        }
 
         // Inject viewport + force mobile layout CSS
         org.jsoup.nodes.Element head = jsoupDoc.head();
@@ -485,8 +500,8 @@ public class MiniProxy {
             return url.replaceFirst("(?i)https?://([a-z]{2}\\.)?wikipedia\\.org", "https://$1m.wikipedia.org");
         }
         // Facebook / YouTube basic
-        if (lower.contains("facebook.com") && !lower.contains("m.facebook") && !lower.contains("mbasic.")) {
-            return url.replaceFirst("(?i)https?://(www\\.)?facebook\\.com", "https://m.facebook.com");
+        if (lower.contains("facebook.com") && !lower.contains("mbasic.facebook")) {
+            return url.replaceFirst("(?i)https?://(www\\.|m\\.)?facebook\\.com", "https://mbasic.facebook.com");
         }
         if (lower.contains("youtube.com") && !lower.contains("m.youtube")) {
             return url.replaceFirst("(?i)https?://(www\\.)?youtube\\.com", "https://m.youtube.com");
