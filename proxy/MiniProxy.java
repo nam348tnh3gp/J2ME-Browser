@@ -289,6 +289,7 @@ public class MiniProxy {
             java.lang.reflect.Method getRootBox = panel.getClass().getMethod("getRootBox");
             Box root = (Box) getRootBox.invoke(panel);
             if (root != null) collectLinks(root, links, finalUrl);
+            System.out.println("  Links found: " + links.size());
         } catch (Exception e) {
             System.err.println("  Link extract fail: " + e);
         }

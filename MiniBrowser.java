@@ -438,6 +438,7 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             t.lastBytes = imgData.length;
             // Auto-focus first link (feature phone standard — PicoBrowser / Opera Mini style)
             canvas.selectedLink = (links != null && links.size() > 0) ? 0 : -1;
+            if (canvas.selectedLink >= 0) canvas.ensureVisible();
 
             canvas.stopLoading(); canvas.repaint();
             canvas.setStatus(url + "  (" + (imgData.length / 1024) + " KB)");
@@ -617,12 +618,25 @@ class BrowserCanvas extends Canvas {
     void drawLinkHighlight(Graphics g, MiniBrowser.Tab t, int top) {
         if (selectedLink < 0 || t.links == null || selectedLink >= t.links.size()) return;
         MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
-        int y1 = top + (lr.y1 - t.scrollY) - 1;
-        int y2 = top + (lr.y2 - t.scrollY) + 1;
-        if (y2 < top || y1 > getHeight() - softBarHeight()) return;
-        g.setColor(0xFF8800);
-        g.drawRect(lr.x1 - 1, y1, (lr.x2 - lr.x1) + 2, y2 - y1);
-        g.drawRect(lr.x1 - 2, y1 - 1, (lr.x2 - lr.x1) + 4, (y2 - y1) + 2);
+        int y1 = top + (lr.y1 - t.scrollY) - 2;
+        int y2 = top + (lr.y2 - t.scrollY) + 2;
+        int bottom = getHeight() - softBarHeight();
+        if (y2 < top || y1 > bottom) return;
+        // Clamp to visible content area
+        if (y1 < top) y1 = top;
+        if (y2 > bottom) y2 = bottom;
+        int x1 = Math.max(0, lr.x1 - 2);
+        int x2 = Math.min(getWidth() - 1, lr.x2 + 2);
+        // Orange focus box (thicker, more visible)
+        g.setColor(0xFF6600);
+        g.drawRect(x1, y1, x2 - x1, y2 - y1);
+        g.drawRect(x1 + 1, y1 + 1, x2 - x1 - 2, y2 - y1 - 2);
+        // Small number badge in corner
+        g.setColor(0xFF6600);
+        g.fillRect(x1, y1, 14, 12);
+        g.setColor(0xFFFFFF);
+        g.setFont(font);
+        g.drawString(String.valueOf(selectedLink + 1), x1 + 2, y1 + 1, Graphics.TOP | Graphics.LEFT);
     }
 
     void drawScrollbar(Graphics g, MiniBrowser.Tab t, int top) {
