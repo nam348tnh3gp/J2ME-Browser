@@ -2,6 +2,13 @@ name: Run Proxy
 
 on:
   workflow_dispatch:
+    inputs:
+      duckdns_domain:
+        description: 'DuckDNS subdomain (e.g. myproxy)'
+        required: true
+      duckdns_token:
+        description: 'DuckDNS token'
+        required: true
 
 jobs:
   proxy:
@@ -21,12 +28,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
 
+      - name: Get public IP and update DuckDNS
+        run: |
+          IP=$(curl -s https://api.ipify.org)
+          echo "Runner IP: $IP"
+          DOMAIN="${{ github.event.inputs.duckdns_domain }}"
+          TOKEN="${{ github.event.inputs.duckdns_token }}"
+          RESULT=$(curl -s "https://www.duckdns.org/update?domains=${DOMAIN}&token=${TOKEN}&ip=${IP}")
+          echo "DuckDNS update: $RESULT"
+          echo "Proxy will be available at ${DOMAIN}.duckdns.org:9999"
+
       - name: Compile proxy
         working-directory: proxy
         run: |
           javac -cp "libs/jsoup.jar:libs/flying-saucer-core.jar" MiniProxy.java
 
-      - name: Run proxy (0.0.0.0:9999)
+      - name: Run proxy
         working-directory: proxy
         run: |
           java -cp ".:libs/jsoup.jar:libs/flying-saucer-core.jar" MiniProxy
