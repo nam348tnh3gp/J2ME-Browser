@@ -617,25 +617,29 @@ class BrowserCanvas extends Canvas {
     void drawLinkHighlight(Graphics g, MiniBrowser.Tab t, int top) {
         if (selectedLink < 0 || t.links == null || selectedLink >= t.links.size()) return;
         MiniBrowser.LinkRect lr = (MiniBrowser.LinkRect) t.links.elementAt(selectedLink);
-        int y1 = top + (lr.y1 - t.scrollY) - 2;
-        int y2 = top + (lr.y2 - t.scrollY) + 2;
         int bottom = getHeight() - softBarHeight();
+        // Screen Y of link top/bottom
+        int y1 = top + (lr.y1 - t.scrollY);
+        int y2 = top + (lr.y2 - t.scrollY);
+        // Skip if completely outside content area
         if (y2 < top || y1 > bottom) return;
-        // Clamp to visible content area
+        // Clamp
         if (y1 < top) y1 = top;
         if (y2 > bottom) y2 = bottom;
-        int x1 = Math.max(0, lr.x1 - 2);
-        int x2 = Math.min(getWidth() - 1, lr.x2 + 2);
-        // Orange focus box (thicker, more visible)
+        if (y2 <= y1) return;
+        int x1 = Math.max(1, lr.x1);
+        int x2 = Math.min(getWidth() - 2, lr.x2);
+        if (x2 <= x1) x2 = x1 + 20;
+        // Orange focus rectangle
         g.setColor(0xFF6600);
+        g.drawRect(x1 - 1, y1 - 1, (x2 - x1) + 2, (y2 - y1) + 2);
         g.drawRect(x1, y1, x2 - x1, y2 - y1);
-        g.drawRect(x1 + 1, y1 + 1, x2 - x1 - 2, y2 - y1 - 2);
-        // Small number badge in corner
+        // Number badge
         g.setColor(0xFF6600);
-        g.fillRect(x1, y1, 14, 12);
+        g.fillRect(x1, y1, 12, 10);
         g.setColor(0xFFFFFF);
         g.setFont(font);
-        g.drawString(String.valueOf(selectedLink + 1), x1 + 2, y1 + 1, Graphics.TOP | Graphics.LEFT);
+        g.drawString(String.valueOf(selectedLink + 1), x1 + 1, y1, Graphics.TOP | Graphics.LEFT);
     }
 
     void drawScrollbar(Graphics g, MiniBrowser.Tab t, int top) {
@@ -702,9 +706,11 @@ class BrowserCanvas extends Canvas {
         MiniBrowser.Tab t = midlet.activeTab();
         if (t.image == null) return;
         int viewH = contentViewH();
+        int imgH = t.image.getHeight();
         t.scrollY += dy;
         if (t.scrollY < 0) t.scrollY = 0;
-        int max = Math.max(0, t.image.getHeight() - viewH);
+        // Allow scrolling until the bottom of the image is at the bottom of the view
+        int max = Math.max(0, imgH - viewH);
         if (t.scrollY > max) t.scrollY = max;
         repaint();
     }
@@ -907,37 +913,60 @@ class BrowserCanvas extends Canvas {
             return;
         }
 
-        // Trang nội dung — ưu tiên chọn link (ô cam)
+        // WAP / Opera Mini style
+        // Up/Down: focus link trước/sau (ô cam)
+        // Left/Right: cuộn trang tự do (page jump)
+        // Fire/5/0: mở link
+        int viewH = contentViewH();
         if (action == UP || keyCode == KEY_NUM2) {
-            moveLinkSelection(-1);
+            if (t.links != null && t.links.size() > 0) {
+                moveLinkSelection(-1);
+            } else {
+                scroll(-32);
+            }
         } else if (action == DOWN || keyCode == KEY_NUM8) {
-            moveLinkSelection(1);
+            if (t.links != null && t.links.size() > 0) {
+                moveLinkSelection(1);
+            } else {
+                scroll(32);
+            }
         } else if (action == LEFT || keyCode == KEY_NUM4) {
-            scroll(-32);
+            scroll(-(viewH - 20));
         } else if (action == RIGHT || keyCode == KEY_NUM6) {
-            scroll(32);
+            scroll(viewH - 20);
         } else if (action == FIRE || keyCode == KEY_NUM5 || keyCode == KEY_NUM0) {
             activateSelectedLink();
         } else if (keyCode == KEY_STAR) {
             t.scrollY = 0;
-            selectedLink = -1;
+            selectedLink = (t.links != null && t.links.size() > 0) ? 0 : -1;
+            if (selectedLink >= 0) ensureVisible();
             repaint();
         } else if (keyCode == KEY_POUND) {
-            midlet.reload();
+            // Cuộn về cuối trang
+            if (t.image != null) {
+                int max = Math.max(0, t.image.getHeight() - viewH);
+                t.scrollY = max;
+                selectedLink = -1;
+                repaint();
+            }
         }
     }
 
     protected void keyRepeated(int keyCode) {
         int action = 0;
         try { action = getGameAction(keyCode); } catch (Exception e) {}
+        MiniBrowser.Tab t = midlet.activeTab();
+        int viewH = contentViewH();
         if (action == UP || keyCode == KEY_NUM2) {
-            moveLinkSelection(-1);
+            if (t.links != null && t.links.size() > 0) moveLinkSelection(-1);
+            else scroll(-48);
         } else if (action == DOWN || keyCode == KEY_NUM8) {
-            moveLinkSelection(1);
+            if (t.links != null && t.links.size() > 0) moveLinkSelection(1);
+            else scroll(48);
         } else if (action == LEFT || keyCode == KEY_NUM4) {
-            scroll(-48);
+            scroll(-(viewH - 20));
         } else if (action == RIGHT || keyCode == KEY_NUM6) {
-            scroll(48);
+            scroll(viewH - 20);
         }
     }
 
