@@ -169,9 +169,66 @@ public class MiniProxy {
     }
 
     // ── Render ──
+
+    // ── Headless Chrome render (WRP / Opera Mini style) ──
+    static Page renderWithChrome(String url, int renderW) throws Exception {
+        String tmpDir = System.getProperty("java.io.tmpdir");
+        String shot = tmpDir + "/j2me_" + System.currentTimeMillis() + ".png";
+        String htmlOut = tmpDir + "/j2me_" + System.currentTimeMillis() + ".html";
+
+        // Screenshot
+        ProcessBuilder pb = new ProcessBuilder(
+            "chromium", "--headless", "--disable-gpu", "--no-sandbox",
+            "--window-size=" + renderW + ",1200",
+            "--screenshot=" + shot,
+            "--virtual-time-budget=8000",
+            url
+        );
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        // Consume output
+        java.io.InputStream is = p.getInputStream();
+        byte[] buf = new byte[1024];
+        while (is.read(buf) > 0) {}
+        int code = p.waitFor();
+        if (code != 0) throw new IOException("Chrome exit " + code);
+
+        BufferedImage img = ImageIO.read(new java.io.File(shot));
+        if (img == null) throw new IOException("Chrome screenshot failed");
+
+        // Crop to content height if possible
+        int usedH = Math.min(img.getHeight(), 4000);
+        if (img.getHeight() > usedH) {
+            img = img.getSubimage(0, 0, img.getWidth(), usedH);
+        }
+
+        // Extract links via a simple HTML dump (Chrome --dump-dom is limited; use jsoup on fetched HTML)
+        List<Link> links = new ArrayList<>();
+        try {
+            String html = fetchHtml(url);
+            links = extractLinksFromHtml(html, url, renderW);
+        } catch (Exception e) {
+            System.err.println("  Chrome link extract fail: " + e.getMessage());
+        }
+
+        // Cleanup
+        new java.io.File(shot).delete();
+
+        img = quantizeToIndexed(img);
+        return new Page(img, links);
+    }
+
     static Page render(String url, int renderW, int screenH) throws Exception {
         // Prefer mobile versions of common sites
         url = preferMobileUrl(url);
+
+        // Try headless Chrome first (WRP / Opera Mini style)
+        try {
+            System.out.println("  Trying Chrome render...");
+            return renderWithChrome(url, renderW);
+        } catch (Exception e) {
+            System.err.println("  Chrome failed, fallback to Flying Saucer: " + e.getMessage());
+        }
 
         // 1. Fetch + follow redirects (google, meta, JS)
         String[] fetchResult = fetchWithRedirects(url);
