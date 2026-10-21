@@ -280,7 +280,7 @@ public class MiniProxy {
         // 4. Quantize (giảm size)
         result = quantizeToIndexed(result);
 
-        // 5. Links
+        // 5. Links — try Flying Saucer box tree, fallback to HTML scan
         List<Link> links = new ArrayList<>();
         try {
             Field panelField = Graphics2DRenderer.class.getDeclaredField("panel");
@@ -289,9 +289,14 @@ public class MiniProxy {
             java.lang.reflect.Method getRootBox = panel.getClass().getMethod("getRootBox");
             Box root = (Box) getRootBox.invoke(panel);
             if (root != null) collectLinks(root, links, finalUrl);
-            System.out.println("  Links found: " + links.size());
+            System.out.println("  FS links: " + links.size());
         } catch (Exception e) {
-            System.err.println("  Link extract fail: " + e);
+            System.err.println("  FS link extract fail: " + e.getMessage());
+        }
+        // Fallback: if FS found nothing, scan HTML for <a href>
+        if (links.isEmpty()) {
+            links = extractLinksFromHtml(html, finalUrl, renderW);
+            System.out.println("  HTML fallback links: " + links.size());
         }
 
         return new Page(result, links);
@@ -520,6 +525,33 @@ public class MiniProxy {
             return url.replaceFirst("(?i)https?://(www\\.)?youtube\\.com", "https://m.youtube.com");
         }
         return url;
+    }
+
+
+    // Fallback: extract <a href> from raw HTML when Flying Saucer box tree fails
+    static List<Link> extractLinksFromHtml(String html, String baseUrl, int renderW) {
+        List<Link> out = new ArrayList<>();
+        if (html == null) return out;
+        try {
+            org.jsoup.nodes.Document doc = Jsoup.parse(html, baseUrl);
+            org.jsoup.select.Elements as = doc.select("a[href]");
+            int y = 40;
+            for (org.jsoup.nodes.Element a : as) {
+                String href = a.attr("href");
+                if (href == null || href.length() == 0 || href.startsWith("#") || href.startsWith("javascript:")) continue;
+                String full = resolveUrl(baseUrl, href);
+                String text = a.text();
+                if (text == null || text.trim().length() == 0) text = href;
+                // Approximate position (will be refined if FS works later)
+                int h = 18;
+                out.add(new Link(4, y, renderW - 8, y + h, full));
+                y += h + 4;
+                if (y > 3000) break;
+            }
+        } catch (Exception e) {
+            System.err.println("  HTML link fallback fail: " + e.getMessage());
+        }
+        return out;
     }
 
 }
