@@ -177,8 +177,10 @@ public class MiniProxy {
         String htmlOut = tmpDir + "/j2me_" + System.currentTimeMillis() + ".html";
 
         // Screenshot
+        String chromeBin = findChrome();
+        if (chromeBin == null) throw new IOException("No Chrome/Chromium binary found");
         ProcessBuilder pb = new ProcessBuilder(
-            "chromium", "--headless", "--disable-gpu", "--no-sandbox",
+            chromeBin, "--headless", "--disable-gpu", "--no-sandbox",
             "--window-size=" + renderW + ",1200",
             "--screenshot=" + shot,
             "--virtual-time-budget=8000",
@@ -609,6 +611,29 @@ public class MiniProxy {
             System.err.println("  HTML link fallback fail: " + e.getMessage());
         }
         return out;
+    }
+
+
+    static String findChrome() {
+        String[] candidates = {
+            "chromium", "chromium-browser", "google-chrome", "chrome",
+            "/data/data/com.termux/files/usr/bin/chromium",
+            "/usr/bin/chromium", "/usr/bin/chromium-browser"
+        };
+        for (String c : candidates) {
+            try {
+                Process p = new ProcessBuilder("which", c).start();
+                if (p.waitFor() == 0) {
+                    java.io.BufferedReader br = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream()));
+                    String line = br.readLine();
+                    if (line != null && line.length() > 0) return line.trim();
+                }
+            } catch (Exception e) {}
+            // Also try direct file check for absolute paths
+            if (c.startsWith("/") && new java.io.File(c).exists()) return c;
+        }
+        return null;
     }
 
 }
