@@ -1,1 +1,0 @@
-$(cat /tmp/MiniBrowser.java)
