@@ -18,8 +18,8 @@ import org.xhtmlrenderer.swing.NaiveUserAgent;
 
 public class MiniProxy {
     static final int PORT = 9999;
-    static final int MAX_RENDER_HEIGHT = 8000;
-    static final int MAX_PIXELS = 2000000;   // ~2M pixels → giới hạn heap client
+    static final int MAX_RENDER_HEIGHT = 4000;
+    static final int MAX_PIXELS = 1200000;   // ~2M pixels → giới hạn heap client
     static final int MAX_URL_LEN = 4096;
     static final int MAX_REDIRECTS = 5;
 
@@ -131,6 +131,11 @@ public class MiniProxy {
                 page = errorPage("Lỗi render: " + e.getMessage(), renderW);
             }
 
+            // Check client still connected before sending (avoid broken pipe)
+            if (s.isClosed() || !s.isConnected()) {
+                System.err.println("  Client already gone, skip send");
+                return;
+            }
             out.writeInt(page.image.getWidth());
             out.writeInt(page.image.getHeight());
             ByteArrayOutputStream imgBuf = new ByteArrayOutputStream();
@@ -149,8 +154,10 @@ public class MiniProxy {
             out.flush();
         } catch (Exception e) {
             String msg = e.getMessage() == null ? "" : e.getMessage();
-            if (e instanceof java.net.SocketException && msg.contains("Broken pipe")) {
-                System.err.println("  Client disconnected (broken pipe)");
+            if (e instanceof java.net.SocketException && 
+                (msg.contains("Broken pipe") || msg.contains("Connection reset") || msg.contains("closed"))) {
+                // Client closed early — normal when user navigates or times out
+                return;
             } else {
                 e.printStackTrace();
             }
