@@ -23,9 +23,9 @@ public class MiniProxy {
     static final int MAX_URL_LEN = 4096;
     static final int MAX_REDIRECTS = 5;
 
+    // UA kiểu Opera Mini / Android — nhiều site lớn tin cậy hơn
     static final String UA =
-        "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/120.0.6099.210 Mobile Safari/537.36";
+        "Opera/9.80 (Android; Opera Mini/8.0.1807/191.379; U; en) Presto/2.12.423 Version/12.16";
 
     static final CookieManager cookieManager = new CookieManager();
 
@@ -174,7 +174,12 @@ public class MiniProxy {
 
         // 2. HTML → XHTML + inject CSS ép giãn theo width
         org.jsoup.nodes.Document jsoupDoc = Jsoup.parse(html, finalUrl);
-        jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas,svg,use").remove();
+        // Aggressive cleanup (inspired by WRP simple-HTML mode)
+        jsoupDoc.select("script,noscript,iframe,object,embed,video,audio,canvas,svg,use,link[rel=stylesheet]").remove();
+        // Remove comments that can break XML
+        for (org.jsoup.nodes.Node n : jsoupDoc.childNodes()) {
+            if (n instanceof org.jsoup.nodes.Comment) n.remove();
+        }
         // Strip any xlink:* attributes (breaks XML namespace parsing on Google etc.)
         for (org.jsoup.nodes.Element el : jsoupDoc.getAllElements()) {
             java.util.Iterator<org.jsoup.nodes.Attribute> it = el.attributes().iterator();
