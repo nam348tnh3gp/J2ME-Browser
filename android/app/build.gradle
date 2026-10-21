@@ -27,3 +27,15 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.core:core:1.13.1'
 }
+
+// ── Fix duplicate Kotlin stdlib classes ──
+// Kotlin >= 1.8 đã gộp kotlin-stdlib-jdk7 & jdk8 vào kotlin-stdlib.
+// Một số lib cũ vẫn kéo jdk7/jdk8 1.6.x → trùng class.
+// Ép toàn bộ về 1.8.22 để hết trùng.
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+}
