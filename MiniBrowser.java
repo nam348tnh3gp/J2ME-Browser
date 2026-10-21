@@ -391,7 +391,6 @@ public class MiniBrowser extends MIDlet implements CommandListener {
             sc = (SocketConnection) Connector.open("socket://" + proxyHost + ":" + proxyPort);
             try {
                 // Timeout dài hơn để proxy kịp render trang phức tạp
-                sc.setSocketOption(SocketConnection.TIMEOUT, 45000);
                 sc.setSocketOption(SocketConnection.DELAY, 0);
             } catch (Exception e) {}
             synchronized (this) {
